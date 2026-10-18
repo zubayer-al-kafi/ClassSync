@@ -1,0 +1,36 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.SmartAttendanceManagementSystem" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Brand Colors -->
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorSecondary">@color/secondary</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="android:colorBackground">@color/dark_background</item>
+
+        <!-- Material Dialog & Calendar/Picker Themes for high contrast buttons -->
+        <item name="materialAlertDialogTheme">@style/CustomMaterialAlertDialogTheme</item>
+        <item name="materialCalendarTheme">@style/CustomMaterialCalendarTheme</item>
+        <item name="materialTimePickerTheme">@style/CustomMaterialTimePickerTheme</item>
+    </style>
+
+    <style name="CustomMaterialAlertDialogTheme" parent="ThemeOverlay.Material3.MaterialAlertDialog">
+        <item name="buttonBarPositiveButtonStyle">@style/Widget.Material3.Button.TextButton.Dialog</item>
+        <item name="buttonBarNegativeButtonStyle">@style/Widget.Material3.Button.TextButton.Dialog</item>
+    </style>
+
+    <style name="CustomMaterialCalendarTheme" parent="ThemeOverlay.Material3.MaterialCalendar">
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorPrimary">@color/primary</item>
+    </style>
+
+    <style name="CustomMaterialTimePickerTheme" parent="ThemeOverlay.Material3.MaterialTimePicker">
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="colorPrimary">@color/primary</item>
+    </style>
+
+    <style name="Widget.Material3.Button.TextButton.Dialog" parent="Widget.Material3.Button.TextButton">
+        <item name="android:textColor">@color/primary</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textStyle">bold</item>
+    </style>
+</resources>

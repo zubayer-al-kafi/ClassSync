@@ -1,0 +1,20 @@
+<resources>
+    <string name="app_name">ClassSync</string>
+    <string name="title_login">Login</string>
+    <string name="title_register">Register</string>
+    <string name="title_dashboard">Dashboard</string>
+    <string name="title_mark_attendance">Mark Attendance</string>
+    <string name="title_attendance_history">Attendance History</string>
+    <string name="welcome_back">Welcome Back</string>
+    <string name="sign_in_subtitle">Sign in to access your ClassSync portal</string>
+    <string name="create_account">Create Account</string>
+    <string name="register_subtitle">Register to join your virtual classroom</string>
+    <string name="label_full_name">Full Name</string>
+    <string name="label_email">Email Address</string>
+    <string name="label_password">Password</string>
+    <string name="label_role">Select Role</string>
+    <string name="btn_login">Sign In</string>
+    <string name="btn_register">Register Account</string>
+    <string name="prompt_no_account">Don\'t have an account? Sign Up</string>
+    <string name="prompt_have_account">Already have an account? Sign In</string>
+</resources>
