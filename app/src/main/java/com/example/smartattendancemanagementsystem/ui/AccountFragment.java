@@ -1,12 +1,14 @@
 package com.example.smartattendancemanagementsystem.ui;
 
 import android.os.Bundle;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
 import android.widget.LinearLayout;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
@@ -22,13 +24,16 @@ import com.example.smartattendancemanagementsystem.R;
 import com.example.smartattendancemanagementsystem.databinding.FragmentAccountBinding;
 import com.example.smartattendancemanagementsystem.model.User;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
-import com.example.smartattendancemanagementsystem.session.SessionState;
 import com.example.smartattendancemanagementsystem.session.SessionViewModel;
 import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputLayout;
+import com.google.firebase.auth.AuthCredential;
+import com.google.firebase.auth.EmailAuthProvider;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
+import com.google.firebase.auth.GoogleAuthProvider;
+import com.google.firebase.auth.UserInfo;
 import com.google.firebase.auth.UserProfileChangeRequest;
 import com.google.firebase.firestore.FirebaseFirestore;
 
@@ -67,6 +72,7 @@ public class AccountFragment extends Fragment {
 
         binding.btnEditProfile.setOnClickListener(v -> openEditProfileDialog());
         binding.btnLogout.setOnClickListener(v -> confirmLogout());
+        binding.btnDeleteAccount.setOnClickListener(v -> confirmDeleteAccount());
 
         // The email is known from Auth immediately; everything else comes from the
         // profile document through the session.
@@ -126,31 +132,31 @@ public class AccountFragment extends Fragment {
             binding.tvEmail.setText(user.getEmail());
         }
 
-        binding.tvRoleBadge.setText("Role: " + (user.isInstructor() ? "Instructor" : "Student"));
+        binding.tvRoleBadge.setText(getString(R.string.role_format, user.isInstructor() ? "Instructor" : "Student"));
 
         if (!TextUtils.isEmpty(user.getStudentId())) {
-            binding.tvStudentIdBadge.setText("Roll: " + user.getStudentId() + " 🔒");
+            binding.tvStudentIdBadge.setText(getString(R.string.roll_format, user.getStudentId()));
             binding.tvStudentIdBadge.setVisibility(View.VISIBLE);
         } else {
             binding.tvStudentIdBadge.setVisibility(View.GONE);
         }
 
         // Unknown stays unknown: an empty department is not "Computer Science".
-        binding.tvDepartmentBadge.setText("Dept: "
-                + (TextUtils.isEmpty(user.getDepartment()) ? "Not set" : user.getDepartment()));
+        binding.tvDepartmentBadge.setText(getString(R.string.dept_format,
+                TextUtils.isEmpty(user.getDepartment()) ? "Not set" : user.getDepartment()));
 
-        binding.tvPhone.setText("📞 Phone: "
-                + (TextUtils.isEmpty(user.getPhone()) ? "Not set" : user.getPhone()));
+        binding.tvPhone.setText(getString(R.string.phone_format,
+                TextUtils.isEmpty(user.getPhone()) ? "Not set" : user.getPhone()));
 
-        binding.tvAddress.setText("📍 Address: "
-                + (TextUtils.isEmpty(user.getAddress()) ? "Not set" : user.getAddress()));
+        binding.tvAddress.setText(getString(R.string.address_format,
+                TextUtils.isEmpty(user.getAddress()) ? "Not set" : user.getAddress()));
 
         // Real binding state: the deviceId is set by markAttendance on the first scan.
-        binding.tvSessionInfo.setText("Signed in as "
-                + (user.isInstructor() ? "Instructor" : "Student")
-                + (TextUtils.isEmpty(user.getDeviceId())
-                ? " · No phone bound yet"
-                : " · This phone is bound to your account"));
+        binding.tvSessionInfo.setText(getString(R.string.session_info_format,
+                user.isInstructor() ? "Instructor" : "Student",
+                TextUtils.isEmpty(user.getDeviceId())
+                        ? "No phone bound yet"
+                        : "This phone is bound to your account"));
     }
 
     // ------------------------------------------------------------------ edit profile
@@ -279,6 +285,130 @@ public class AccountFragment extends Fragment {
         return et;
     }
 
+    // ------------------------------------------------------------------------ delete account
+
+    private boolean isGoogleSignIn(FirebaseUser user) {
+        if (user == null) return false;
+        for (UserInfo userInfo : user.getProviderData()) {
+            if (GoogleAuthProvider.PROVIDER_ID.equals(userInfo.getProviderId())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void confirmDeleteAccount() {
+        if (currentUserModel == null || mAuth.getCurrentUser() == null) return;
+
+        FirebaseUser authUser = mAuth.getCurrentUser();
+        boolean isGoogleUser = isGoogleSignIn(authUser);
+
+        LinearLayout layout = new LinearLayout(requireContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(50, 30, 50, 10);
+
+        TextView promptTv = new TextView(requireContext());
+        promptTv.setText("This action is irreversible. All your data, enrollments, and history will be permanently deleted.\n\n" +
+                (isGoogleUser ? "To confirm deletion, please type 'DELETE' below:" : "Please enter your password below to confirm deletion:"));
+        promptTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.status_absent));
+        promptTv.setTextSize(14);
+        promptTv.setPadding(0, 0, 0, 16);
+
+        final EditText etConfirm = new EditText(requireContext());
+        if (isGoogleUser) {
+            etConfirm.setHint("Type DELETE to confirm");
+            etConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
+        } else {
+            etConfirm.setHint("Current Password");
+            etConfirm.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        }
+
+        layout.addView(promptTv);
+        layout.addView(etConfirm);
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(requireContext())
+                .setTitle("⚠️ Delete Profile & Data")
+                .setView(layout)
+                .setPositiveButton("Permanently Delete", (d, which) -> {
+                    String input = etConfirm.getText().toString().trim();
+                    if (TextUtils.isEmpty(input)) {
+                        toast(isGoogleUser ? "You must type DELETE to confirm." : "Password is required to delete account.");
+                        return;
+                    }
+                    if (isGoogleUser) {
+                        if ("DELETE".equalsIgnoreCase(input)) {
+                            performAccountDeletionWithGoogle(authUser);
+                        } else {
+                            toast("Confirmation text did not match.");
+                        }
+                    } else {
+                        performAccountDeletionWithEmail(authUser, input);
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(
+                ContextCompat.getColor(requireContext(), R.color.status_absent));
+    }
+
+    private void performAccountDeletionWithGoogle(FirebaseUser authUser) {
+        if (authUser == null) return;
+        setLoadingState(true);
+        executeDeletionProcess(authUser);
+    }
+
+    private void performAccountDeletionWithEmail(FirebaseUser authUser, String password) {
+        if (authUser == null || authUser.getEmail() == null) return;
+        setLoadingState(true);
+
+        AuthCredential credential = EmailAuthProvider.getCredential(authUser.getEmail(), password);
+        authUser.reauthenticate(credential).addOnSuccessListener(aVoid -> {
+            executeDeletionProcess(authUser);
+        }).addOnFailureListener(e -> {
+            if (isAdded()) {
+                setLoadingState(false);
+                toast(UiErrors.describe(e, "Incorrect password. Authentication failed."));
+            }
+        });
+    }
+
+    private void executeDeletionProcess(FirebaseUser authUser) {
+        String uid = authUser.getUid();
+
+        db.collection("users").document(uid).delete().addOnCompleteListener(task -> {
+            authUser.delete().addOnCompleteListener(authTask -> {
+                if (authTask.isSuccessful()) {
+                    if (isAdded()) {
+                        ClassroomRepository.getInstance().clearAllData();
+                        session.clear();
+                        toast("Account and all data deleted permanently.");
+
+                        NavOptions clearBackStack = new NavOptions.Builder()
+                                .setPopUpTo(R.id.nav_graph, true)
+                                .build();
+                        Navigation.findNavController(requireView()).navigate(
+                                R.id.action_accountFragment_to_loginFragment, null, clearBackStack);
+                    }
+                } else {
+                    if (isAdded()) {
+                        setLoadingState(false);
+                        toast(UiErrors.describe(authTask.getException(), "Could not delete account from Auth. Please log out and sign in again before trying."));
+                    }
+                }
+            });
+        });
+    }
+
+    private void setLoadingState(boolean isLoading) {
+        if (binding != null) {
+            binding.progressBar.setVisibility(isLoading ? View.VISIBLE : View.GONE);
+            binding.btnDeleteAccount.setEnabled(!isLoading);
+            binding.btnLogout.setEnabled(!isLoading);
+            binding.btnEditProfile.setEnabled(!isLoading);
+        }
+    }
+
     // ------------------------------------------------------------------------ logout
 
     private void confirmLogout() {
@@ -300,6 +430,7 @@ public class AccountFragment extends Fragment {
         if (binding == null) return;
 
         binding.btnLogout.setEnabled(false);
+        binding.btnDeleteAccount.setEnabled(false);
         binding.btnEditProfile.setEnabled(false);
         binding.progressBar.setVisibility(View.VISIBLE);
 

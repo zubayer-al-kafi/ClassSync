@@ -12,6 +12,7 @@ firebaseBom = "33.1.2"
 googleServices = "4.4.2"
 lifecycle = "2.7.0"
 playServicesLocation = "21.2.0"
+playServicesAuth = "21.1.1"
 
 zxing = "3.5.3"
 zxingAndroid = "4.3.0"
@@ -33,6 +34,7 @@ firebase-functions = { group = "com.google.firebase", name = "firebase-functions
 androidx-lifecycle-viewmodel = { group = "androidx.lifecycle", name = "lifecycle-viewmodel", version.ref = "lifecycle" }
 androidx-lifecycle-livedata = { group = "androidx.lifecycle", name = "lifecycle-livedata", version.ref = "lifecycle" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
+play-services-auth = { group = "com.google.android.gms", name = "play-services-auth", version.ref = "playServicesAuth" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingAndroid" }
 

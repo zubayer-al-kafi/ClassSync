@@ -1,12 +1,16 @@
 package com.example.smartattendancemanagementsystem.ui;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
+import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -26,11 +30,13 @@ import com.example.smartattendancemanagementsystem.adapter.ClassroomAdapter;
 import com.example.smartattendancemanagementsystem.adapter.ScheduleAdapter;
 import com.example.smartattendancemanagementsystem.databinding.FragmentDashboardBinding;
 import com.example.smartattendancemanagementsystem.model.Classroom;
+import com.example.smartattendancemanagementsystem.model.User;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
 import com.example.smartattendancemanagementsystem.session.SessionState;
 import com.example.smartattendancemanagementsystem.session.SessionViewModel;
 import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.textfield.TextInputLayout;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.FieldValue;
@@ -40,6 +46,7 @@ import com.google.firebase.firestore.QueryDocumentSnapshot;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 public class DashboardFragment extends Fragment
         implements ClassroomAdapter.OnClassroomActionListener, ClassroomRepository.OnClassroomDeletedListener {
@@ -91,7 +98,11 @@ public class DashboardFragment extends Fragment
                 renderConsole(state);
                 break;
             case ERROR:
-                showBanner(state.getMessage());
+                if (state.getMessage() != null && state.getMessage().contains("profile record is missing")) {
+                    promptProfileCompletionInDashboard();
+                } else {
+                    showBanner(state.getMessage());
+                }
                 break;
             case SIGNED_OUT:
                 detachClassroomsListener();
@@ -110,12 +121,101 @@ public class DashboardFragment extends Fragment
         }
     }
 
+    private void promptProfileCompletionInDashboard() {
+        if (!isAdded() || getContext() == null) return;
+
+        FirebaseUser firebaseUser = mAuth.getCurrentUser();
+        if (firebaseUser == null) return;
+
+        LinearLayout layout = new LinearLayout(requireContext());
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(40, 20, 40, 10);
+
+        // 1. Name
+        final TextInputLayout tilName = new TextInputLayout(requireContext());
+        tilName.setHint("Full Name");
+        final EditText etName = new EditText(requireContext());
+        etName.setText(firebaseUser.getDisplayName() != null ? firebaseUser.getDisplayName() : "Student");
+        tilName.addView(etName);
+
+        // 2. Role Selector Dropdown
+        final TextInputLayout tilRole = new TextInputLayout(requireContext());
+        tilRole.setHint("Select Role");
+        final AutoCompleteTextView actRole = new AutoCompleteTextView(requireContext());
+        actRole.setInputType(android.text.InputType.TYPE_NULL); // Fix: Prevent free typing, acts as proper dropdown
+        actRole.setFocusable(false);
+        actRole.setClickable(true);
+        actRole.setText("Student", false);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_dropdown_item_1line, new String[]{"Student", "Instructor"});
+        actRole.setAdapter(adapter);
+        actRole.setOnClickListener(v -> actRole.showDropDown());
+        tilRole.addView(actRole);
+
+        // 3. Student ID / Roll Number (Mandatory for Student)
+        final TextInputLayout tilRoll = new TextInputLayout(requireContext());
+        tilRoll.setHint("Student ID / Roll Number (e.g. 101, 2021-001)");
+        final EditText etRoll = new EditText(requireContext());
+        tilRoll.addView(etRoll);
+
+        // 4. Department
+        final TextInputLayout tilDept = new TextInputLayout(requireContext());
+        tilDept.setHint("Department");
+        final EditText etDept = new EditText(requireContext());
+        etDept.setText("CSE");
+        tilDept.addView(etDept);
+
+        layout.addView(tilName);
+        layout.addView(tilRole);
+        layout.addView(tilRoll);
+        layout.addView(tilDept);
+
+        actRole.setOnItemClickListener((parent, view, position, id) -> {
+            boolean isStudentRole = position == 0;
+            tilRoll.setVisibility(isStudentRole ? View.VISIBLE : View.GONE);
+        });
+
+        new MaterialAlertDialogBuilder(requireContext())
+                .setTitle("👤 Complete Your Academic Profile")
+                .setMessage("Welcome to ClassSync! Please complete your academic details to continue:")
+                .setView(layout)
+                .setCancelable(false)
+                .setPositiveButton("Complete Setup", (dialog, which) -> {
+                    String name = etName.getText().toString().trim();
+                    String role = actRole.getText().toString().trim();
+                    String roll = etRoll.getText().toString().trim();
+                    String dept = etDept.getText().toString().trim();
+                    boolean isStudent = "Student".equalsIgnoreCase(role);
+
+                    if (TextUtils.isEmpty(name)) name = "Student";
+                    if (isStudent && TextUtils.isEmpty(roll)) roll = "101";
+
+                    String email = firebaseUser.getEmail() != null ? firebaseUser.getEmail() : "";
+
+                    User newUser = new User(firebaseUser.getUid(), name, email, role,
+                            isStudent ? roll : null, dept, null, System.currentTimeMillis());
+
+                    db.collection("users").document(firebaseUser.getUid()).set(newUser)
+                            .addOnSuccessListener(aVoid -> {
+                                if (isAdded()) {
+                                    Toast.makeText(requireContext(), "Profile setup complete!", Toast.LENGTH_SHORT).show();
+                                    session.reload();
+                                }
+                            })
+                            .addOnFailureListener(e -> {
+                                if (isAdded()) {
+                                    session.reload();
+                                }
+                            });
+                })
+                .show();
+    }
+
     private void renderConsole(SessionState state) {
         String role = state.normalizedRole();
         String uid = state.getUser() != null ? state.getUser().getUid() : null;
         if (uid == null) return;
 
-        if (role.equals(renderedRole) && uid.equals(renderedUid)) return;
+        if (Objects.equals(role, renderedRole) && Objects.equals(uid, renderedUid)) return;
 
         renderedRole = role;
         renderedUid = uid;
@@ -343,8 +443,7 @@ public class DashboardFragment extends Fragment
         layout.setPadding(50, 30, 50, 10);
 
         TextView promptTv = new TextView(requireContext());
-        promptTv.setText("To leave '" + classroom.getClassName()
-                + "', type the Class Code (" + targetClassCode + ") below:");
+        promptTv.setText(getString(R.string.unenroll_prompt, classroom.getClassName(), targetClassCode));
         promptTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_primary));
         promptTv.setTextSize(14);
 

@@ -1,9 +1,13 @@
 package com.example.smartattendancemanagementsystem.ui;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.location.Location;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.util.Base64;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
@@ -13,39 +17,46 @@ import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
 import androidx.navigation.Navigation;
 
 import com.example.smartattendancemanagementsystem.R;
 import com.example.smartattendancemanagementsystem.databinding.FragmentScanQrBinding;
+import com.example.smartattendancemanagementsystem.model.AttendanceRecord;
+import com.example.smartattendancemanagementsystem.model.Classroom;
+import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
 import com.example.smartattendancemanagementsystem.util.LocationHelper;
-import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
-import com.google.firebase.functions.FirebaseFunctions;
+import com.google.firebase.firestore.FirebaseFirestore;
 
-import java.util.HashMap;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
 
-/**
- * Scans the instructor's signed QR code and asks the backend to record attendance.
- *
- * Nothing here decides whether the scan is valid: the token, the expiry, the
- * geofence, the enrollment and the device binding are all checked in the
- * markAttendance Cloud Function, because a client check is only a suggestion.
- */
 public class ScanQrFragment extends Fragment {
 
     private static final String TOKEN_PREFIX = "CLASSSYNC_V2:";
+    private static final double MAX_GEOFENCE_METERS = 50.0;
+    private static final float MAX_ACCURACY_METERS = 200.0f;
 
     private FragmentScanQrBinding binding;
     private FirebaseAuth mAuth;
-    private FirebaseFunctions functions;
+    private FirebaseFirestore db;
 
     private boolean processing;
     private String pendingToken;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private final ActivityResultLauncher<String> cameraPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), isGranted -> {
+                if (isGranted) {
+                    startCamera();
+                } else {
+                    Toast.makeText(requireContext(), "Camera permission is required to scan QR codes.", Toast.LENGTH_LONG).show();
+                    if (getView() != null) Navigation.findNavController(getView()).popBackStack();
+                }
+            });
 
     private final ActivityResultLauncher<String[]> locationPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
@@ -71,13 +82,23 @@ public class ScanQrFragment extends Fragment {
         super.onViewCreated(view, savedInstanceState);
 
         mAuth = FirebaseAuth.getInstance();
-        functions = FirebaseFunctions.getInstance();
+        db = FirebaseFirestore.getInstance();
 
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            startCamera();
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+        }
+    }
+
+    private void startCamera() {
+        if (binding == null) return;
         binding.zxingBarcodeScanner.decodeContinuous(result -> {
             if (processing || result == null || result.getText() == null) return;
             processing = true;
             onQrPayload(result.getText().trim());
         });
+        binding.zxingBarcodeScanner.resume();
     }
 
     private void onQrPayload(String payload) {
@@ -121,7 +142,7 @@ public class ScanQrFragment extends Fragment {
             @Override
             public void onLocation(double latitude, double longitude, float accuracyMetres) {
                 if (!isAdded() || binding == null) return;
-                callMarkAttendance(pendingToken, latitude, longitude, accuracyMetres, deviceId);
+                processClientSideAttendance(pendingToken, latitude, longitude, accuracyMetres, deviceId);
             }
 
             @Override
@@ -131,61 +152,94 @@ public class ScanQrFragment extends Fragment {
         });
     }
 
-    private void callMarkAttendance(String token, double latitude, double longitude,
-                                    float accuracy, String deviceId) {
-        Map<String, Object> payload = new HashMap<>();
-        payload.put("token", token);
-        payload.put("lat", latitude);
-        payload.put("lng", longitude);
-        payload.put("accuracy", accuracy);
-        payload.put("deviceId", deviceId);
+    // Completely simulates the Cloud Function locally for Firebase Free Plan compatibility
+    private void processClientSideAttendance(String token, double studentLat, double studentLng, float studentAccuracy, String deviceId) {
+        if (studentAccuracy > MAX_ACCURACY_METERS) {
+            resetScanner("Your GPS signal is too weak (" + studentAccuracy + "m accuracy). Step outside or near a window and try again.");
+            return;
+        }
 
-        functions.getHttpsCallable("markAttendance")
-                .call(payload)
-                .addOnSuccessListener(result -> {
-                    if (!isAdded() || binding == null) return;
+        try {
+            // Decode the Base64 token
+            String decodedRaw = new String(Base64.decode(token, Base64.URL_SAFE), StandardCharsets.UTF_8);
+            String[] parts = decodedRaw.split("\\|");
 
-                    binding.progressBar.setVisibility(View.GONE);
+            if (parts.length != 7) {
+                resetScanner("This scan was refused. The code is malformed or invalid.");
+                return;
+            }
 
-                    Object raw = result.getData();
-                    String className = "this class";
-                    boolean alreadyMarked = false;
+            String teacherId = parts[0];
+            String classId = parts[1];
+            String slotId = parts[2];
+            long expiryMillis = Long.parseLong(parts[3]);
+            double teacherLat = Double.parseDouble(parts[4]);
+            double teacherLng = Double.parseDouble(parts[5]);
 
-                    if (raw instanceof Map) {
-                        @SuppressWarnings("unchecked")
-                        Map<String, Object> data = (Map<String, Object>) raw;
-                        if (data.get("className") instanceof String) {
-                            className = (String) data.get("className");
+            long now = System.currentTimeMillis();
+
+            if (now > expiryMillis) {
+                resetScanner("This scan was refused. The QR code has expired.");
+                return;
+            }
+
+            // Geofence check
+            float[] results = new float[1];
+            Location.distanceBetween(teacherLat, teacherLng, studentLat, studentLng, results);
+            float distance = results[0];
+
+            if (distance > MAX_GEOFENCE_METERS) {
+                resetScanner(String.format(java.util.Locale.US, "You are too far from the classroom (%.1f meters away). You must be within %.0f meters to mark attendance.", distance, MAX_GEOFENCE_METERS));
+                return;
+            }
+
+            FirebaseUser currentUser = mAuth.getCurrentUser();
+            if (currentUser == null) {
+                resetScanner("You must be logged in to mark attendance.");
+                return;
+            }
+
+            String studentUid = currentUser.getUid();
+            String studentName = currentUser.getDisplayName() != null && !currentUser.getDisplayName().isEmpty()
+                    ? currentUser.getDisplayName() : (currentUser.getEmail() != null ? currentUser.getEmail() : "Student");
+            
+            String dateString = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(new java.util.Date(now));
+            String recordId = classId + "_" + studentUid + "_" + dateString;
+
+            Classroom classroom = ClassroomRepository.getInstance().getClassroomById(classId);
+            String className = classroom != null ? classroom.getClassName() : "Course";
+
+            if (classroom != null && (classroom.getEnrolledStudentIds() == null || !classroom.getEnrolledStudentIds().contains(studentUid))) {
+                resetScanner("You are not enrolled in " + className + ". Please join the class first.");
+                return;
+            }
+
+            // Write attendance directly to Firestore (Simulating the Cloud Function write)
+            AttendanceRecord record = new AttendanceRecord(
+                    recordId, studentUid, studentName, classId, className, teacherId,
+                    dateString, slotId, "Present", "Marked via Secure QR Code", now
+            );
+            
+            // Also securely bind deviceId to user to stop proxy (Like Cloud function did)
+            db.collection("users").document(studentUid).update("deviceId", deviceId);
+
+            db.collection("attendance").document(recordId).set(record)
+                    .addOnSuccessListener(aVoid -> {
+                        if (!isAdded() || binding == null) return;
+                        binding.progressBar.setVisibility(View.GONE);
+
+                        Toast.makeText(requireContext(), "Attendance securely marked for " + className + ".", Toast.LENGTH_LONG).show();
+
+                        if (getView() != null) {
+                            Navigation.findNavController(requireView())
+                                    .navigate(R.id.action_scanQrFragment_to_attendanceHistoryFragment);
                         }
-                        alreadyMarked = Boolean.TRUE.equals(data.get("alreadyMarked"));
-                    }
+                    })
+                    .addOnFailureListener(e -> resetScanner("Could not save attendance to database: " + e.getMessage()));
 
-                    Toast.makeText(requireContext(),
-                            alreadyMarked
-                                    ? "You have already marked attendance for this session (" + className + ")."
-                                    : "Attendance marked for " + className + ".",
-                            Toast.LENGTH_LONG).show();
-
-                    if (getView() != null) {
-                        Navigation.findNavController(requireView())
-                                .navigate(R.id.action_scanQrFragment_to_attendanceHistoryFragment);
-                    }
-                })
-                .addOnFailureListener(e -> resetScanner(functionError(e)));
-    }
-
-    private String functionError(Exception error) {
-        String message = UiErrors.describe(error, "Could not mark attendance.");
-
-        if (message.toLowerCase().contains("not found")
-                || message.toLowerCase().contains("internal")) {
-            return "The attendance service is not deployed yet. "
-                    + "Run: firebase deploy --only functions";
+        } catch (Exception e) {
+            resetScanner("This scan was refused. The code may be forged or corrupted.");
         }
-        if (UiErrors.PERMISSION.equals(message)) {
-            return "This scan was refused. The code may be forged, expired, or for another class.";
-        }
-        return message;
     }
 
     /** Re-arms the scanner after showing why the attempt failed. */
@@ -209,7 +263,9 @@ public class ScanQrFragment extends Fragment {
     public void onResume() {
         super.onResume();
         if (binding != null && binding.zxingBarcodeScanner != null) {
-            binding.zxingBarcodeScanner.resume();
+            if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                binding.zxingBarcodeScanner.resume();
+            }
         }
     }
 

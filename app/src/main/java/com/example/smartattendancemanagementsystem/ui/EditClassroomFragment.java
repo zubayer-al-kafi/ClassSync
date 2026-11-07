@@ -31,6 +31,8 @@ import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.timepicker.MaterialTimePicker;
+import com.google.android.material.timepicker.TimeFormat;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.FirebaseFirestore;
@@ -38,6 +40,7 @@ import com.google.firebase.firestore.FirebaseFirestore;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class EditClassroomFragment extends Fragment {
@@ -80,11 +83,30 @@ public class EditClassroomFragment extends Fragment {
         binding.actDaySelector.setAdapter(dayAdapter);
         binding.actDaySelector.setText(DAYS[0], false);
 
+        binding.etSlotStart.setOnClickListener(v -> openTimePicker(binding.etSlotStart, "Select Start Time"));
+        binding.etSlotEnd.setOnClickListener(v -> openTimePicker(binding.etSlotEnd, "Select End Time"));
+
         binding.btnAddSlot.setOnClickListener(v -> addClassSlot());
         binding.btnSaveClassroom.setOnClickListener(this::saveClassroomSettings);
         binding.btnDeleteClassroom.setOnClickListener(v -> confirmAndDeleteClassroom());
 
         loadClassroomData();
+    }
+
+    private void openTimePicker(TextView targetView, String title) {
+        MaterialTimePicker timePicker = new MaterialTimePicker.Builder()
+                .setTimeFormat(TimeFormat.CLOCK_24H)
+                .setHour(9)
+                .setMinute(0)
+                .setTitleText(title)
+                .build();
+
+        timePicker.addOnPositiveButtonClickListener(v -> {
+            String selectedTime = String.format(Locale.getDefault(), "%02d:%02d", timePicker.getHour(), timePicker.getMinute());
+            targetView.setText(selectedTime);
+        });
+
+        timePicker.show(getParentFragmentManager(), "TIME_PICKER");
     }
 
     private void loadClassroomData() {
@@ -124,17 +146,20 @@ public class EditClassroomFragment extends Fragment {
 
     private void addClassSlot() {
         String day = binding.actDaySelector.getText() != null ? binding.actDaySelector.getText().toString().trim() : "MONDAY";
-        String start = binding.etSlotStart.getText() != null ? binding.etSlotStart.getText().toString().trim() : "09:00";
-        String end = binding.etSlotEnd.getText() != null ? binding.etSlotEnd.getText().toString().trim() : "10:30";
+        String start = binding.etSlotStart.getText() != null ? binding.etSlotStart.getText().toString().trim() : "";
+        String end = binding.etSlotEnd.getText() != null ? binding.etSlotEnd.getText().toString().trim() : "";
 
         if (TextUtils.isEmpty(start) || TextUtils.isEmpty(end)) {
-            Toast.makeText(requireContext(), "Please enter valid start and end times", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), "Please select valid start and end times", Toast.LENGTH_SHORT).show();
             return;
         }
 
         ClassSlot newSlot = new ClassSlot(day, start, end);
         activeSlots.add(newSlot);
         renderSlotsContainer();
+        
+        binding.etSlotStart.setText("");
+        binding.etSlotEnd.setText("");
         Toast.makeText(requireContext(), "Added " + day + " (" + start + " - " + end + ") slot", Toast.LENGTH_SHORT).show();
     }
 
@@ -143,16 +168,16 @@ public class EditClassroomFragment extends Fragment {
 
         if (activeSlots.isEmpty()) {
             TextView emptyTv = new TextView(requireContext());
-            emptyTv.setText("No weekly class slots added yet.");
+            emptyTv.setText(getString(R.string.no_slots_added_yet));
             emptyTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_secondary));
             emptyTv.setTextSize(13);
             binding.layoutSlotsContainer.addView(emptyTv);
             return;
         }
 
-        for (int i = 0; i < activeSlots.size(); i++) {
-            ClassSlot slot = activeSlots.get(i);
-            int index = i;
+        int slotNum = 1;
+        for (ClassSlot slot : activeSlots) {
+            final int currentPos = slotNum - 1;
 
             MaterialCardView card = new MaterialCardView(requireContext());
             card.setCardBackgroundColor(ContextCompat.getColor(requireContext(), R.color.dark_surface_variant));
@@ -166,7 +191,7 @@ public class EditClassroomFragment extends Fragment {
             View actionsLayout = view.findViewById(R.id.layout_actions);
 
             nameTv.setText(slot.getDayOfWeek());
-            subjTv.setText("Weekly Routine Slot #" + (index + 1));
+            subjTv.setText(getString(R.string.weekly_routine_slot_title, slotNum));
             timeTv.setText("⏰ Time: " + slot.getStartTime() + " - " + slot.getEndTime());
             badgeTv.setText("Routine Slot");
             badgeTv.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.primary));
@@ -180,11 +205,14 @@ public class EditClassroomFragment extends Fragment {
             btnSecondary.setVisibility(View.GONE);
 
             btnDeleteSlot.setOnClickListener(v -> {
-                activeSlots.remove(index);
-                renderSlotsContainer();
+                if (currentPos < activeSlots.size()) {
+                    activeSlots.remove(currentPos);
+                    renderSlotsContainer();
+                }
             });
 
             binding.layoutSlotsContainer.addView(view);
+            slotNum++;
         }
     }
 

@@ -1,5 +1,7 @@
 package com.example.smartattendancemanagementsystem.ui;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
@@ -14,7 +16,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
-import androidx.lifecycle.ViewModelProvider;
 import androidx.navigation.Navigation;
 
 import com.example.smartattendancemanagementsystem.R;
@@ -22,9 +23,6 @@ import com.example.smartattendancemanagementsystem.adapter.AssignmentAdapter;
 import com.example.smartattendancemanagementsystem.databinding.FragmentAssignmentsBinding;
 import com.example.smartattendancemanagementsystem.model.Assignment;
 import com.example.smartattendancemanagementsystem.model.Classroom;
-import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
-import com.example.smartattendancemanagementsystem.session.SessionViewModel;
-import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.datepicker.MaterialDatePicker;
 import com.google.android.material.timepicker.MaterialTimePicker;
@@ -48,9 +46,6 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
     private AssignmentAdapter adapter;
     private FirebaseAuth mAuth;
     private FirebaseFirestore db;
-    private SessionViewModel session;
-
-    private final ClassroomRepository classrooms = ClassroomRepository.getInstance();
 
     private final List<Classroom> availableClassrooms = new ArrayList<>();
     private final List<Assignment> assignmentsList = new ArrayList<>();
@@ -58,7 +53,7 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
 
     private Classroom selectedClassroom;
     private String targetClassIdFromArgs;
-    private boolean isTeacher;
+    private boolean isTeacher = false;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -73,27 +68,23 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
 
         mAuth = FirebaseAuth.getInstance();
         db = FirebaseFirestore.getInstance();
-        session = new ViewModelProvider(requireActivity()).get(SessionViewModel.class);
 
         if (getArguments() != null) {
             targetClassIdFromArgs = getArguments().getString("classId");
         }
 
-        adapter = new AssignmentAdapter(this, false);
+        SharedPreferences prefs = requireContext().getSharedPreferences("app_session", Context.MODE_PRIVATE);
+        String role = prefs.getString("role", "Student");
+        isTeacher = "Instructor".equalsIgnoreCase(role) || "Teacher".equalsIgnoreCase(role);
+
+        binding.cardCreateAssignment.setVisibility(isTeacher ? View.VISIBLE : View.GONE);
+
+        adapter = new AssignmentAdapter(this, isTeacher);
         binding.rvAssignments.setAdapter(adapter);
 
         binding.btnAddAssignmentLink.setOnClickListener(v -> addAssignmentLink());
         binding.etDueDate.setOnClickListener(v -> openDateTimePickerDialog());
         binding.btnPostAssignment.setOnClickListener(v -> postNewAssignment());
-
-        session.getState().observe(getViewLifecycleOwner(), state -> {
-            if (binding == null) return;
-
-            isTeacher = state != null && state.isReady()
-                    && "Instructor".equals(state.normalizedRole());
-            binding.cardCreateAssignment.setVisibility(isTeacher ? View.VISIBLE : View.GONE);
-            adapter.setTeacherMode(isTeacher);
-        });
 
         if (targetClassIdFromArgs != null && !targetClassIdFromArgs.isEmpty()) {
             loadAssignments(targetClassIdFromArgs);
@@ -103,10 +94,9 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
     }
 
     private void addAssignmentLink() {
-        String inputLink = binding.etAssignmentLinkInput.getText() != null
-                ? binding.etAssignmentLinkInput.getText().toString().trim() : "";
+        String inputLink = binding.etAssignmentLinkInput.getText() != null ? binding.etAssignmentLinkInput.getText().toString().trim() : "";
         if (TextUtils.isEmpty(inputLink)) {
-            toast("Please paste a valid URL / link");
+            Toast.makeText(requireContext(), "Please paste a valid URL / link", Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -120,40 +110,38 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
     private void renderAssignmentLinksContainer() {
         binding.layoutAddedAssignmentLinksContainer.removeAllViews();
 
-        for (int i = 0; i < addedAssignmentLinks.size(); i++) {
-            String link = addedAssignmentLinks.get(i);
-            int index = i;
-
+        int index = 0;
+        for (String link : addedAssignmentLinks) {
+            final int currentIndex = index;
             LinearLayout itemLayout = new LinearLayout(requireContext());
             itemLayout.setOrientation(LinearLayout.HORIZONTAL);
             itemLayout.setPadding(0, 4, 0, 4);
 
             TextView linkTv = new TextView(requireContext());
-            linkTv.setText("#" + (index + 1) + ": " + link);
+            linkTv.setText(getString(R.string.link_format, currentIndex + 1, link));
             linkTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.secondary));
             linkTv.setTextSize(12);
-            linkTv.setLayoutParams(new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            linkTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            MaterialButton removeBtn = new MaterialButton(requireContext(), null,
-                    com.google.android.material.R.attr.borderlessButtonStyle);
-            removeBtn.setText("Remove");
+            MaterialButton removeBtn = new MaterialButton(requireContext(), null, com.google.android.material.R.attr.borderlessButtonStyle);
+            removeBtn.setText("❌");
             removeBtn.setPadding(0, 0, 0, 0);
 
             removeBtn.setOnClickListener(v -> {
-                addedAssignmentLinks.remove(index);
+                addedAssignmentLinks.remove(currentIndex);
                 renderAssignmentLinksContainer();
             });
 
             itemLayout.addView(linkTv);
             itemLayout.addView(removeBtn);
             binding.layoutAddedAssignmentLinksContainer.addView(itemLayout);
+            index++;
         }
     }
 
     private void openDateTimePickerDialog() {
         MaterialDatePicker<Long> datePicker = MaterialDatePicker.Builder.datePicker()
-                .setTitleText("Select assignment due date")
+                .setTitleText("Select Assignment Due Date")
                 .setSelection(MaterialDatePicker.todayInUtcMilliseconds())
                 .build();
 
@@ -165,16 +153,26 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
             String datePart = dateFormat.format(calendar.getTime());
 
             MaterialTimePicker timePicker = new MaterialTimePicker.Builder()
-                    .setTimeFormat(TimeFormat.CLOCK_24H)
-                    .setHour(23)
+                    .setTimeFormat(TimeFormat.CLOCK_12H)
+                    .setHour(11)
                     .setMinute(59)
-                    .setTitleText("Select due time")
+                    .setTitleText("Select Due Time")
                     .build();
 
             timePicker.addOnPositiveButtonClickListener(v -> {
-                String timePart = String.format(Locale.getDefault(), "%02d:%02d",
-                        timePicker.getHour(), timePicker.getMinute());
-                binding.etDueDate.setText(datePart + " " + timePart);
+                int hour = timePicker.getHour();
+                int minute = timePicker.getMinute();
+                
+                String amPm = "AM";
+                if (hour >= 12) {
+                    amPm = "PM";
+                    if (hour > 12) hour -= 12;
+                } else if (hour == 0) {
+                    hour = 12;
+                }
+                
+                String timePart = String.format(Locale.getDefault(), "%02d:%02d %s", hour, minute, amPm);
+                binding.etDueDate.setText(String.format("%s %s", datePart, timePart));
             });
 
             timePicker.show(getParentFragmentManager(), "TIME_PICKER");
@@ -188,43 +186,34 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
         if (currentUser == null) return;
 
         String uid = currentUser.getUid();
-        boolean instructor = session.isInstructor();
-
         binding.progressBar.setVisibility(View.VISIBLE);
 
-        classrooms.loadMine(uid, instructor)
-                .addOnSuccessListener(fetched -> {
-                    if (!isAdded() || binding == null) return;
+        db.collection("classrooms").get()
+                .addOnSuccessListener(snapshots -> {
+                    if (isAdded()) {
+                        binding.progressBar.setVisibility(View.GONE);
+                        availableClassrooms.clear();
+                        List<String> names = new ArrayList<>();
+                        int selectedIndex = 0;
 
-                    binding.progressBar.setVisibility(View.GONE);
-                    availableClassrooms.clear();
-                    availableClassrooms.addAll(fetched);
+                        for (QueryDocumentSnapshot doc : snapshots) {
+                            Classroom c = doc.toObject(Classroom.class);
+                            if (c.isTeacherAssigned(uid) || (c.getEnrolledStudentIds() != null && c.getEnrolledStudentIds().contains(uid))) {
+                                availableClassrooms.add(c);
+                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
 
-                    List<String> names = new ArrayList<>();
-                    int selectedIndex = 0;
+                                if (targetClassIdFromArgs != null && targetClassIdFromArgs.equals(c.getClassId())) {
+                                    selectedIndex = availableClassrooms.size() - 1;
+                                }
+                            }
+                        }
 
-                    for (Classroom c : availableClassrooms) {
-                        names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                        if (targetClassIdFromArgs != null
-                                && targetClassIdFromArgs.equals(c.getClassId())) {
-                            selectedIndex = availableClassrooms.size() - 1;
+                        if (!availableClassrooms.isEmpty()) {
+                            setupDropdown(names, selectedIndex);
+                        } else {
+                            binding.tvEmptyAssignments.setVisibility(assignmentsList.isEmpty() ? View.VISIBLE : View.GONE);
                         }
                     }
-
-                    if (!availableClassrooms.isEmpty()) {
-                        setupDropdown(names, selectedIndex);
-                    } else {
-                        binding.tvEmptyAssignments.setText(
-                                "You are not in any classroom yet. Join one with a class code first.");
-                        binding.tvEmptyAssignments.setVisibility(View.VISIBLE);
-                    }
-                })
-                .addOnFailureListener(e -> {
-                    if (!isAdded() || binding == null) return;
-                    binding.progressBar.setVisibility(View.GONE);
-                    binding.tvEmptyAssignments.setText(
-                            UiErrors.describe(e, "Could not load your classrooms."));
-                    binding.tvEmptyAssignments.setVisibility(View.VISIBLE);
                 });
     }
 
@@ -248,7 +237,7 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
     }
 
     private void loadAssignments(String classId) {
-        if (classId == null || binding == null) return;
+        if (classId == null) return;
 
         binding.progressBar.setVisibility(View.VISIBLE);
 
@@ -256,57 +245,44 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
                 .whereEqualTo("classId", classId)
                 .get()
                 .addOnSuccessListener(snapshots -> {
-                    if (!isAdded() || binding == null) return;
-
-                    binding.progressBar.setVisibility(View.GONE);
-                    assignmentsList.clear();
-                    for (QueryDocumentSnapshot doc : snapshots) {
-                        Assignment assignment = doc.toObject(Assignment.class);
-                        if (assignment != null) assignmentsList.add(assignment);
-                    }
-                    Collections.sort(assignmentsList,
-                            (a1, a2) -> Long.compare(a2.getTimestamp(), a1.getTimestamp()));
-                    adapter.setAssignments(assignmentsList);
-
-                    if (assignmentsList.isEmpty()) {
-                        binding.tvEmptyAssignments.setText("No assignments posted for this class yet.");
-                        binding.tvEmptyAssignments.setVisibility(View.VISIBLE);
-                    } else {
-                        binding.tvEmptyAssignments.setVisibility(View.GONE);
+                    if (isAdded()) {
+                        binding.progressBar.setVisibility(View.GONE);
+                        assignmentsList.clear();
+                        for (QueryDocumentSnapshot doc : snapshots) {
+                            assignmentsList.add(doc.toObject(Assignment.class));
+                        }
+                        Collections.sort(assignmentsList, (a1, a2) -> Long.compare(a2.getTimestamp(), a1.getTimestamp()));
+                        adapter.setAssignments(assignmentsList);
+                        binding.tvEmptyAssignments.setVisibility(assignmentsList.isEmpty() ? View.VISIBLE : View.GONE);
                     }
                 })
                 .addOnFailureListener(e -> {
-                    if (!isAdded() || binding == null) return;
-                    binding.progressBar.setVisibility(View.GONE);
-                    binding.tvEmptyAssignments.setText(
-                            UiErrors.describe(e, "Could not load the assignments."));
-                    binding.tvEmptyAssignments.setVisibility(View.VISIBLE);
+                    if (isAdded()) {
+                        binding.progressBar.setVisibility(View.GONE);
+                        binding.tvEmptyAssignments.setVisibility(assignmentsList.isEmpty() ? View.VISIBLE : View.GONE);
+                    }
                 });
     }
 
     private void postNewAssignment() {
         if (selectedClassroom == null) {
-            toast("Select a classroom first");
+            Toast.makeText(requireContext(), "Select a classroom first", Toast.LENGTH_SHORT).show();
             return;
         }
 
-        String title = binding.etAssignmentTitle.getText() != null
-                ? binding.etAssignmentTitle.getText().toString().trim() : "";
-        String instructions = binding.etAssignmentInstructions.getText() != null
-                ? binding.etAssignmentInstructions.getText().toString().trim() : "";
-        String dueDate = binding.etDueDate.getText() != null
-                ? binding.etDueDate.getText().toString().trim() : "";
-        String maxMarksStr = binding.etMaxMarks.getText() != null
-                ? binding.etMaxMarks.getText().toString().trim() : "100";
+        String title = binding.etAssignmentTitle.getText() != null ? binding.etAssignmentTitle.getText().toString().trim() : "";
+        String instructions = binding.etAssignmentInstructions.getText() != null ? binding.etAssignmentInstructions.getText().toString().trim() : "";
+        String dueDate = binding.etDueDate.getText() != null ? binding.etDueDate.getText().toString().trim() : "";
+        String maxMarksStr = binding.etMaxMarks.getText() != null ? binding.etMaxMarks.getText().toString().trim() : "100";
 
         if (TextUtils.isEmpty(title)) {
-            toast("Assignment title is required");
+            Toast.makeText(requireContext(), "Assignment title is required", Toast.LENGTH_SHORT).show();
             return;
         }
 
         StringBuilder combinedInstructions = new StringBuilder(instructions);
         if (!addedAssignmentLinks.isEmpty()) {
-            combinedInstructions.append("\nResource links: ");
+            combinedInstructions.append("\nResource Links: ");
             for (String link : addedAssignmentLinks) {
                 combinedInstructions.append(link).append(" ");
             }
@@ -315,8 +291,7 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
         int maxMarks = 100;
         try {
             maxMarks = Integer.parseInt(maxMarksStr);
-        } catch (NumberFormatException ignored) {
-        }
+        } catch (NumberFormatException ignored) {}
 
         if (TextUtils.isEmpty(dueDate)) {
             SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault());
@@ -330,30 +305,22 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
 
         Assignment assignment = new Assignment(
                 assignmentId, selectedClassroom.getClassId(), selectedClassroom.getClassName(),
-                title, combinedInstructions.toString().trim(), dueDate, maxMarks, uid,
-                System.currentTimeMillis()
+                title, combinedInstructions.toString().trim(), dueDate, maxMarks, uid, System.currentTimeMillis()
         );
 
         binding.progressBar.setVisibility(View.VISIBLE);
         db.collection("assignments").document(assignmentId).set(assignment)
                 .addOnSuccessListener(aVoid -> {
-                    if (!isAdded() || binding == null) return;
-
-                    binding.progressBar.setVisibility(View.GONE);
-                    binding.etAssignmentTitle.setText("");
-                    binding.etAssignmentInstructions.setText("");
-                    binding.etDueDate.setText("");
-                    addedAssignmentLinks.clear();
-                    renderAssignmentLinksContainer();
-                    toast("Assignment posted");
-                    loadAssignments(selectedClassroom.getClassId());
-                })
-                .addOnFailureListener(e -> {
-                    if (!isAdded() || binding == null) return;
-                    binding.progressBar.setVisibility(View.GONE);
-                    Toast.makeText(requireContext(),
-                            UiErrors.describe(e, "Could not post the assignment."),
-                            Toast.LENGTH_LONG).show();
+                    if (isAdded()) {
+                        binding.progressBar.setVisibility(View.GONE);
+                        binding.etAssignmentTitle.setText("");
+                        binding.etAssignmentInstructions.setText("");
+                        binding.etDueDate.setText("");
+                        addedAssignmentLinks.clear();
+                        renderAssignmentLinksContainer();
+                        Toast.makeText(requireContext(), "Assignment posted successfully!", Toast.LENGTH_SHORT).show();
+                        loadAssignments(selectedClassroom.getClassId());
+                    }
                 });
     }
 
@@ -366,17 +333,9 @@ public class AssignmentsFragment extends Fragment implements AssignmentAdapter.O
         bundle.putString("classId", assignment.getClassId());
 
         if (isTeacher) {
-            Navigation.findNavController(requireView())
-                    .navigate(R.id.action_assignmentsFragment_to_gradeSubmissionsFragment, bundle);
+            Navigation.findNavController(getView()).navigate(R.id.action_assignmentsFragment_to_gradeSubmissionsFragment, bundle);
         } else {
-            Navigation.findNavController(requireView())
-                    .navigate(R.id.action_assignmentsFragment_to_submitAssignmentFragment, bundle);
-        }
-    }
-
-    private void toast(String message) {
-        if (isAdded() && getContext() != null) {
-            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
+            Navigation.findNavController(getView()).navigate(R.id.action_assignmentsFragment_to_submitAssignmentFragment, bundle);
         }
     }
 

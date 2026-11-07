@@ -51,6 +51,9 @@ dependencies {
     implementation(libs.firebase.firestore)
     implementation(libs.firebase.functions)
 
+    // Google Sign In
+    implementation(libs.play.services.auth)
+
     // Lifecycle (session state)
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.lifecycle.livedata)
