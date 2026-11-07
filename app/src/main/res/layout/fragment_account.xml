@@ -29,6 +29,24 @@
             android:textColor="@color/text_secondary"
             android:textSize="14sp" />
 
+        <ProgressBar
+            android:id="@+id/progress_bar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:layout_marginTop="16dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/tv_account_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="@color/status_absent"
+            android:textSize="13sp"
+            android:visibility="gone"
+            tools:text="Could not load your profile. Check your connection." />
+
         <!-- User Profile Card -->
         <com.google.android.material.card.MaterialCardView
             android:id="@+id/card_account_profile"
@@ -202,6 +220,15 @@
                     android:textColor="@color/text_primary"
                     android:textSize="16sp"
                     android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tv_session_info"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp"
+                    tools:text="Signed in as Student · This phone is bound to your account" />
 
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btn_logout"

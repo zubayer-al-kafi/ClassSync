@@ -26,14 +26,18 @@ import com.example.smartattendancemanagementsystem.R;
 import com.example.smartattendancemanagementsystem.adapter.SubmissionAdapter;
 import com.example.smartattendancemanagementsystem.databinding.FragmentGradeSubmissionsBinding;
 import com.example.smartattendancemanagementsystem.model.Submission;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.FirebaseFirestore;
 import com.google.firebase.firestore.QueryDocumentSnapshot;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class GradeSubmissionsFragment extends Fragment implements SubmissionAdapter.OnSubmissionActionListener {
 
@@ -70,91 +74,103 @@ public class GradeSubmissionsFragment extends Fragment implements SubmissionAdap
     }
 
     private void loadSubmissions() {
-        if (assignmentId == null) return;
+        FirebaseUser currentUser = mAuth.getCurrentUser();
+        if (assignmentId == null || currentUser == null) {
+            showEmpty("This assignment could not be opened.");
+            return;
+        }
 
         binding.progressBar.setVisibility(View.VISIBLE);
 
+        // teacherId is part of the query because the rules only let an instructor read
+        // submissions whose teacherId is their own uid.
         db.collection("submissions")
+                .whereEqualTo("teacherId", currentUser.getUid())
                 .whereEqualTo("assignmentId", assignmentId)
                 .get()
                 .addOnSuccessListener(snapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        submissionsList.clear();
-                        for (QueryDocumentSnapshot doc : snapshots) {
-                            submissionsList.add(doc.toObject(Submission.class));
-                        }
-                        adapter.setSubmissions(submissionsList);
-                        binding.tvEmptySubmissions.setVisibility(submissionsList.isEmpty() ? View.VISIBLE : View.GONE);
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    submissionsList.clear();
+                    for (QueryDocumentSnapshot doc : snapshots) {
+                        Submission submission = doc.toObject(Submission.class);
+                        if (submission != null) submissionsList.add(submission);
                     }
+                    adapter.setSubmissions(submissionsList);
+                    binding.tvEmptySubmissions.setVisibility(
+                            submissionsList.isEmpty() ? View.VISIBLE : View.GONE);
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        binding.tvEmptySubmissions.setVisibility(submissionsList.isEmpty() ? View.VISIBLE : View.GONE);
-                    }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    showEmpty(UiErrors.describe(e, "Could not load the submissions."));
                 });
+    }
+
+    private void showEmpty(String message) {
+        if (binding == null) return;
+        binding.tvEmptySubmissions.setText(message);
+        binding.tvEmptySubmissions.setVisibility(View.VISIBLE);
     }
 
     @Override
     public void onGradeSubmission(Submission submission) {
-        if (submission == null) return;
+        if (submission == null || submission.getSubmissionId() == null) return;
 
         LinearLayout layout = new LinearLayout(requireContext());
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(40, 20, 40, 10);
 
-        // Display submitted text preview
         if (submission.getSubmissionText() != null && !submission.getSubmissionText().trim().isEmpty()) {
             TextView workTv = new TextView(requireContext());
-            workTv.setText("📄 Student Work: " + submission.getSubmissionText().trim());
+            workTv.setText("Student work: " + submission.getSubmissionText().trim());
             workTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_primary));
             workTv.setTextSize(13);
             workTv.setPadding(0, 0, 0, 10);
             layout.addView(workTv);
         }
 
-        // Display submitted links inside dialog
-        String combinedContent = (submission.getSubmissionText() != null ? submission.getSubmissionText() : "") + " " +
-                (submission.getFileUrl() != null ? submission.getFileUrl() : "");
+        String combinedContent = (submission.getSubmissionText() != null ? submission.getSubmissionText() : "")
+                + " " + (submission.getFileUrl() != null ? submission.getFileUrl() : "");
 
         List<String> detectedUrls = SubmissionAdapter.extractUrls(combinedContent);
-        if (!detectedUrls.isEmpty()) {
-            for (int i = 0; i < detectedUrls.size(); i++) {
-                String fullUrl = detectedUrls.get(i);
+        for (int i = 0; i < detectedUrls.size(); i++) {
+            String fullUrl = detectedUrls.get(i);
 
-                LinearLayout linkRow = new LinearLayout(requireContext());
-                linkRow.setOrientation(LinearLayout.HORIZONTAL);
-                linkRow.setGravity(Gravity.CENTER_VERTICAL);
+            LinearLayout linkRow = new LinearLayout(requireContext());
+            linkRow.setOrientation(LinearLayout.HORIZONTAL);
+            linkRow.setGravity(Gravity.CENTER_VERTICAL);
 
-                MaterialButton openBtn = new MaterialButton(requireContext(), null, com.google.android.material.R.attr.borderlessButtonStyle);
-                openBtn.setText("🔗 Open Link #" + (i + 1));
-                openBtn.setTextColor(ContextCompat.getColor(requireContext(), R.color.secondary));
-                openBtn.setTextSize(12);
+            MaterialButton openBtn = new MaterialButton(requireContext(), null,
+                    com.google.android.material.R.attr.borderlessButtonStyle);
+            openBtn.setText("Open link #" + (i + 1));
+            openBtn.setTextColor(ContextCompat.getColor(requireContext(), R.color.secondary));
+            openBtn.setTextSize(12);
 
-                MaterialButton copyBtn = new MaterialButton(requireContext(), null, com.google.android.material.R.attr.borderlessButtonStyle);
-                copyBtn.setText("📋 Copy");
-                copyBtn.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_secondary));
-                copyBtn.setTextSize(12);
+            MaterialButton copyBtn = new MaterialButton(requireContext(), null,
+                    com.google.android.material.R.attr.borderlessButtonStyle);
+            copyBtn.setText("Copy");
+            copyBtn.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_secondary));
+            copyBtn.setTextSize(12);
 
-                openBtn.setOnClickListener(v -> openUrl(fullUrl));
-                copyBtn.setOnClickListener(v -> copyToClipboard(fullUrl));
+            openBtn.setOnClickListener(v -> openUrl(fullUrl));
+            copyBtn.setOnClickListener(v -> copyToClipboard(fullUrl));
 
-                linkRow.addView(openBtn);
-                linkRow.addView(copyBtn);
-                layout.addView(linkRow);
-            }
+            linkRow.addView(openBtn);
+            linkRow.addView(copyBtn);
+            layout.addView(linkRow);
         }
 
         final EditText etScore = new EditText(requireContext());
-        etScore.setHint("Enter Marks / Score (e.g. 95)");
+        etScore.setHint("Enter marks / score (e.g. 95)");
         etScore.setInputType(InputType.TYPE_CLASS_NUMBER);
         if (submission.isGraded()) {
             etScore.setText(String.valueOf(submission.getScore()));
         }
 
         final EditText etFeedback = new EditText(requireContext());
-        etFeedback.setHint("Teacher Feedback / Comments");
+        etFeedback.setHint("Teacher feedback / comments");
         if (submission.getFeedback() != null) {
             etFeedback.setText(submission.getFeedback());
         }
@@ -163,32 +179,55 @@ public class GradeSubmissionsFragment extends Fragment implements SubmissionAdap
         layout.addView(etFeedback);
 
         new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("Grade Work: " + submission.getStudentName())
+                .setTitle("Grade work: " + submission.getStudentName())
                 .setView(layout)
                 .setPositiveButton("Save Grade", (dialog, which) -> {
                     String scoreStr = etScore.getText().toString().trim();
                     String feedback = etFeedback.getText().toString().trim();
 
                     if (TextUtils.isEmpty(scoreStr)) {
-                        Toast.makeText(requireContext(), "Please enter valid marks", Toast.LENGTH_SHORT).show();
+                        toast("Please enter valid marks");
                         return;
                     }
 
-                    int score = 0;
+                    int score;
                     try {
                         score = Integer.parseInt(scoreStr);
-                    } catch (NumberFormatException ignored) {}
+                    } catch (NumberFormatException e) {
+                        toast("Marks must be a number");
+                        return;
+                    }
 
-                    submission.setScore(score);
-                    submission.setFeedback(feedback);
-                    submission.setGraded(true);
-
-                    db.collection("submissions").document(submission.getSubmissionId()).set(submission);
-                    Toast.makeText(requireContext(), "Grade & Feedback saved!", Toast.LENGTH_SHORT).show();
-                    loadSubmissions();
+                    saveGrade(submission, score, feedback);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    /** Only the three grading fields are written: the rules reject anything else. */
+    private void saveGrade(Submission submission, int score, String feedback) {
+        Map<String, Object> fields = new HashMap<>();
+        fields.put("score", score);
+        fields.put("feedback", feedback);
+        fields.put("graded", true);
+
+        binding.progressBar.setVisibility(View.VISIBLE);
+
+        db.collection("submissions").document(submission.getSubmissionId())
+                .update(fields)
+                .addOnSuccessListener(unused -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    toast("Grade and feedback saved");
+                    loadSubmissions();
+                })
+                .addOnFailureListener(e -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    Toast.makeText(requireContext(),
+                            UiErrors.describe(e, "Could not save the grade."),
+                            Toast.LENGTH_LONG).show();
+                });
     }
 
     private void openUrl(String fullUrl) {
@@ -197,23 +236,28 @@ public class GradeSubmissionsFragment extends Fragment implements SubmissionAdap
             if (!targetUrl.startsWith("http://") && !targetUrl.startsWith("https://")) {
                 targetUrl = "http://" + targetUrl;
             }
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl));
-            startActivity(intent);
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(targetUrl)));
         } catch (Exception e) {
-            Toast.makeText(requireContext(), "Cannot open link: " + fullUrl, Toast.LENGTH_SHORT).show();
+            toast("Cannot open link: " + fullUrl);
         }
     }
 
     private void copyToClipboard(String text) {
         try {
-            ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText("Submitted Student Link", text);
+            ClipboardManager clipboard =
+                    (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
-                clipboard.setPrimaryClip(clip);
-                Toast.makeText(requireContext(), "📋 Link copied to clipboard!", Toast.LENGTH_SHORT).show();
+                clipboard.setPrimaryClip(ClipData.newPlainText("Submitted student link", text));
+                toast("Link copied to clipboard");
             }
         } catch (Exception e) {
-            Toast.makeText(requireContext(), "Copied: " + text, Toast.LENGTH_SHORT).show();
+            toast("Copied: " + text);
+        }
+    }
+
+    private void toast(String message) {
+        if (isAdded() && getContext() != null) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
         }
     }
 

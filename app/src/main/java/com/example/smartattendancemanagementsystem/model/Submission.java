@@ -4,6 +4,7 @@ public class Submission {
     private String submissionId;
     private String assignmentId;
     private String classId;
+    private String teacherId; // denormalised so instructors can query their own submissions
     private String studentId;
     private String studentName;
     private String submissionText;
@@ -18,12 +19,13 @@ public class Submission {
     }
 
     public Submission(String submissionId, String assignmentId, String classId,
-                      String studentId, String studentName, String submissionText,
-                      String fileUrl, int score, String feedback, boolean graded,
-                      long submittedAt) {
+                      String teacherId, String studentId, String studentName,
+                      String submissionText, String fileUrl, int score, String feedback,
+                      boolean graded, long submittedAt) {
         this.submissionId = submissionId;
         this.assignmentId = assignmentId;
         this.classId = classId;
+        this.teacherId = teacherId;
         this.studentId = studentId;
         this.studentName = studentName;
         this.submissionText = submissionText;
@@ -42,6 +44,9 @@ public class Submission {
 
     public String getClassId() { return classId; }
     public void setClassId(String classId) { this.classId = classId; }
+
+    public String getTeacherId() { return teacherId; }
+    public void setTeacherId(String teacherId) { this.teacherId = teacherId; }
 
     public String getStudentId() { return studentId; }
     public void setStudentId(String studentId) { this.studentId = studentId; }

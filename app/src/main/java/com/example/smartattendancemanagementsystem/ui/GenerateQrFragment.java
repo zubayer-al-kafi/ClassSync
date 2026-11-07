@@ -10,6 +10,8 @@ import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
@@ -17,39 +19,63 @@ import androidx.fragment.app.Fragment;
 import com.example.smartattendancemanagementsystem.databinding.FragmentGenerateQrBinding;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.util.AppClock;
+import com.example.smartattendancemanagementsystem.util.LocationHelper;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
-import com.google.firebase.firestore.FirebaseFirestore;
-import com.google.firebase.firestore.QueryDocumentSnapshot;
+import com.google.firebase.functions.FirebaseFunctions;
 import com.google.zxing.BarcodeFormat;
 import com.journeyapps.barcodescanner.BarcodeEncoder;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
+/**
+ * Issues signed, short-lived QR tokens for the classroom the instructor is in.
+ *
+ * The payload is opaque: only the Cloud Function can mint or verify it. The old
+ * version drew a hash the scanner never checked, so a screenshot - or a hand-built
+ * string - was as good as a live scan.
+ */
 public class GenerateQrFragment extends Fragment {
+
+    private static final long REFRESH_INTERVAL_MS = 10_000L;
 
     private FragmentGenerateQrBinding binding;
     private FirebaseAuth mAuth;
-    private FirebaseFirestore db;
+    private FirebaseFunctions functions;
 
     private final List<Classroom> teacherClassrooms = new ArrayList<>();
     private Classroom selectedClassroom;
 
-    // Default classroom location coordinates (University Classroom GPS)
-    private final double teacherLat = 23.8103;
-    private final double teacherLng = 90.4125;
+    private boolean issuing;
+    private boolean permissionDenied;
 
-    private final Handler qrRefreshHandler = new Handler(Looper.getMainLooper());
-    private final Runnable qrRefreshRunnable = new Runnable() {
+    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    private final Runnable refreshRunnable = new Runnable() {
         @Override
         public void run() {
-            if (isAdded() && selectedClassroom != null) {
-                generateRollingQrBitmap();
-                qrRefreshHandler.postDelayed(this, 10000); // Auto-refreshes every 10 seconds
-            }
+            issueToken();
         }
     };
+
+    private final ActivityResultLauncher<String[]> locationPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestMultiplePermissions(),
+                    result -> {
+                        if (!isAdded()) return;
+                        if (LocationHelper.hasPermission(requireContext())) {
+                            permissionDenied = false;
+                            toast("Location enabled. Issuing the QR code...");
+                            issueToken();
+                        } else {
+                            permissionDenied = true;
+                            showMessage("Location permission is off, so no QR code can be issued. "
+                                    + "Enable it in Settings, then reopen this screen.");
+                        }
+                    });
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -63,9 +89,12 @@ public class GenerateQrFragment extends Fragment {
         super.onViewCreated(view, savedInstanceState);
 
         mAuth = FirebaseAuth.getInstance();
-        db = FirebaseFirestore.getInstance();
+        functions = FirebaseFunctions.getInstance();
 
-        binding.btnGenerateQr.setOnClickListener(v -> startRollingQr());
+        binding.btnGenerateQr.setOnClickListener(v -> {
+            if (!ensureLocationPermission()) return;
+            issueToken();
+        });
 
         loadTeacherClassrooms();
     }
@@ -76,53 +105,41 @@ public class GenerateQrFragment extends Fragment {
 
         binding.progressBar.setVisibility(View.VISIBLE);
 
-        List<Classroom> memoryList = ClassroomRepository.getInstance().getTeacherClassrooms(teacherUid);
-
-        db.collection("classrooms")
-                .whereEqualTo("teacherId", teacherUid)
-                .get()
-                .addOnSuccessListener(queryDocumentSnapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        teacherClassrooms.clear();
-                        List<String> names = new ArrayList<>();
-
-                        for (QueryDocumentSnapshot doc : queryDocumentSnapshots) {
-                            Classroom c = doc.toObject(Classroom.class);
-                            teacherClassrooms.add(c);
-                            names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                        }
-
-                        if (teacherClassrooms.isEmpty() && !memoryList.isEmpty()) {
-                            teacherClassrooms.addAll(memoryList);
-                            for (Classroom c : memoryList) {
-                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                            }
-                        }
-
-                        if (!teacherClassrooms.isEmpty()) {
-                            setupDropdown(names);
-                        } else {
-                            Toast.makeText(requireContext(), "No classrooms found. Please create one first.", Toast.LENGTH_SHORT).show();
-                        }
-                    }
+        ClassroomRepository.getInstance().loadMine(teacherUid, true)
+                .addOnSuccessListener(fetched -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    applyClassrooms(fetched);
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        if (!memoryList.isEmpty()) {
-                            teacherClassrooms.addAll(memoryList);
-                            List<String> names = new ArrayList<>();
-                            for (Classroom c : memoryList) {
-                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                            }
-                            setupDropdown(names);
-                        }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+
+                    List<Classroom> cached =
+                            ClassroomRepository.getInstance().getTeacherClassrooms(teacherUid);
+                    if (!cached.isEmpty()) {
+                        applyClassrooms(cached);
+                        toast(UiErrors.describe(e, "Showing cached classrooms."));
+                    } else {
+                        toast(UiErrors.describe(e, "Could not load your classrooms."));
                     }
                 });
     }
 
-    private void setupDropdown(List<String> names) {
+    private void applyClassrooms(List<Classroom> classrooms) {
+        teacherClassrooms.clear();
+        teacherClassrooms.addAll(classrooms);
+
+        if (teacherClassrooms.isEmpty()) {
+            showMessage("No classrooms found. Create one first.");
+            return;
+        }
+
+        List<String> names = new ArrayList<>();
+        for (Classroom c : teacherClassrooms) {
+            names.add(c.getClassName() + " (" + c.getClassCode() + ")");
+        }
+
         ArrayAdapter<String> arrayAdapter = new ArrayAdapter<>(
                 requireContext(),
                 android.R.layout.simple_dropdown_item_1line,
@@ -131,46 +148,183 @@ public class GenerateQrFragment extends Fragment {
         binding.actClassroom.setAdapter(arrayAdapter);
         binding.actClassroom.setOnItemClickListener((parent, view, position, id) -> {
             selectedClassroom = teacherClassrooms.get(position);
-            startRollingQr();
+            startRefreshing();
         });
 
         selectedClassroom = teacherClassrooms.get(0);
         binding.actClassroom.setText(names.get(0), false);
-        startRollingQr();
+        startRefreshing();
     }
 
-    private void startRollingQr() {
-        qrRefreshHandler.removeCallbacks(qrRefreshRunnable);
-        qrRefreshHandler.post(qrRefreshRunnable);
-    }
+    private void startRefreshing() {
+        refreshHandler.removeCallbacks(refreshRunnable);
 
-    private void generateRollingQrBitmap() {
         if (selectedClassroom == null) return;
+        if (!ensureLocationPermission()) {
+            permissionDenied = true;
+            return;
+        }
 
-        long currentSec = System.currentTimeMillis() / 1000;
-        String tokenHash = String.valueOf(selectedClassroom.getClassId().hashCode() ^ currentSec);
+        refreshHandler.post(refreshRunnable);
+    }
 
-        // Dynamic Payload: CLASSSYNC_DYNAMIC:<classId>:<timestampSec>:<lat>:<lng>:<hash>
-        String qrPayload = "CLASSSYNC_DYNAMIC:" + selectedClassroom.getClassId() + ":" +
-                currentSec + ":" + teacherLat + ":" + teacherLng + ":" + tokenHash;
+    private boolean ensureLocationPermission() {
+        if (LocationHelper.hasPermission(requireContext())) return true;
+
+        if (permissionDenied) {
+            showMessage("Location permission is off, so no QR code can be issued. "
+                    + "Enable it in Settings, then reopen this screen.");
+            return false;
+        }
+
+        locationPermissionLauncher.launch(LocationHelper.PERMISSIONS);
+        return false;
+    }
+
+    private void issueToken() {
+        if (!isAdded() || binding == null || selectedClassroom == null) return;
+        if (issuing) return;
+
+        issuing = true;
+        binding.progressBar.setVisibility(View.VISIBLE);
+
+        LocationHelper.currentLocation(requireActivity(), new LocationHelper.Callback() {
+            @Override
+            public void onLocation(double latitude, double longitude, float accuracyMetres) {
+                if (!isAdded() || binding == null) return;
+                requestToken(latitude, longitude, accuracyMetres);
+            }
+
+            @Override
+            public void onFailure(String message) {
+                if (!isAdded() || binding == null) return;
+                issuing = false;
+                binding.progressBar.setVisibility(View.GONE);
+                showMessage(message);
+                refreshHandler.removeCallbacks(refreshRunnable);
+            }
+        });
+    }
+
+    private void requestToken(double latitude, double longitude, float accuracy) {
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("classId", selectedClassroom.getClassId());
+        payload.put("lat", latitude);
+        payload.put("lng", longitude);
+        payload.put("accuracy", accuracy);
+
+        functions.getHttpsCallable("issueQrToken")
+                .call(payload)
+                .addOnSuccessListener(result -> {
+                    issuing = false;
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+
+                    Object raw = result.getData();
+                    if (!(raw instanceof Map)) {
+                        showMessage("Unexpected response from the attendance service.");
+                        return;
+                    }
+
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> data = (Map<String, Object>) raw;
+                    String token = data.get("token") instanceof String ? (String) data.get("token") : null;
+                    String slotId = data.get("slotId") instanceof String ? (String) data.get("slotId") : null;
+                    String className = data.get("className") instanceof String
+                            ? (String) data.get("className") : selectedClassroom.getClassName();
+
+                    if (token == null) {
+                        showMessage("The attendance service did not return a QR token.");
+                        return;
+                    }
+
+                    Object rawEnd = data.get("sessionEndsAtMillis");
+                    long sessionEndsAt = rawEnd instanceof Number
+                            ? ((Number) rawEnd).longValue() : 0L;
+
+                    renderQr(token, className, slotId, sessionEndsAt);
+                    scheduleNextRefresh();
+                })
+                .addOnFailureListener(e -> {
+                    issuing = false;
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    showMessage(functionError(e));
+                    refreshHandler.removeCallbacks(refreshRunnable);
+                });
+    }
+
+    private void renderQr(String token, String className, String slotId, long sessionEndsAt) {
+        // Format marker lets the scanner tell a v2 token from anything else instantly.
+        String qrPayload = "CLASSSYNC_V2:" + token;
 
         try {
-            BarcodeEncoder barcodeEncoder = new BarcodeEncoder();
-            Bitmap bitmap = barcodeEncoder.encodeBitmap(qrPayload, BarcodeFormat.QR_CODE, 600, 600);
+            Bitmap bitmap = new BarcodeEncoder()
+                    .encodeBitmap(qrPayload, BarcodeFormat.QR_CODE, 600, 600);
+
             binding.ivQrCode.setImageBitmap(bitmap);
             binding.cardQrResult.setVisibility(View.VISIBLE);
-            binding.tvQrClassTitle.setText(selectedClassroom.getClassName());
-            binding.tvQrSubject.setText(selectedClassroom.getSubject() + " (" + selectedClassroom.getClassCode() + ")");
-            binding.tvQrInstructions.setText("🔄 Dynamic Rolling QR (Auto-refreshes every 10s to prevent photo sharing).");
+            binding.tvQrClassTitle.setText(className);
+            binding.tvQrSubject.setText(selectedClassroom.getSubject()
+                    + " (" + selectedClassroom.getClassCode() + ")");
+            String closing = sessionEndsAt > 0
+                    ? " Attendance closes at " + AppClock.timeOfDay(sessionEndsAt) + "."
+                    : "";
+            binding.tvQrInstructions.setText("Signed QR - valid for 20 seconds and bound to this "
+                    + "location. Refreshes every 10s." + closing);
         } catch (Exception e) {
-            Toast.makeText(requireContext(), "Error generating QR code: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            showMessage("Could not draw the QR code: " + e.getMessage());
         }
+    }
+
+    private void scheduleNextRefresh() {
+        refreshHandler.removeCallbacks(refreshRunnable);
+        refreshHandler.postDelayed(refreshRunnable, REFRESH_INTERVAL_MS);
+    }
+
+    private String functionError(Exception error) {
+        String message = UiErrors.describe(error, "Could not issue a QR code.");
+        if (message.toLowerCase().contains("not found")
+                || message.toLowerCase().contains("internal")) {
+            return "The attendance functions are not deployed yet. "
+                    + "Run: firebase deploy --only functions";
+        }
+        return message;
+    }
+
+    private void showMessage(String message) {
+        if (binding == null) return;
+        binding.cardQrResult.setVisibility(View.VISIBLE);
+        binding.tvQrInstructions.setText(message);
+        binding.ivQrCode.setImageDrawable(null);
+    }
+
+    private void toast(String message) {
+        if (isAdded() && getContext() != null) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        if (selectedClassroom != null && LocationHelper.hasPermission(requireContext())) {
+            startRefreshing();
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        refreshHandler.removeCallbacks(refreshRunnable);
     }
 
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        qrRefreshHandler.removeCallbacks(qrRefreshRunnable);
+        refreshHandler.removeCallbacks(refreshRunnable);
         binding = null;
     }
 }

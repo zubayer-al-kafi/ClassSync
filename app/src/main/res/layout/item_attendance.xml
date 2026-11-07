@@ -34,13 +34,33 @@
                 tools:text="Mobile App Development" />
 
             <TextView
+                android:id="@+id/tv_slot"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="@color/secondary"
+                android:textSize="12sp"
+                tools:text="Fri 09:00" />
+
+            <TextView
                 android:id="@+id/tv_date"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="2dp"
                 android:textColor="@color/text_secondary"
                 android:textSize="13sp"
-                tools:text="Date: 2025-02-17" />
+                tools:text="Fri, 06 Nov 2026" />
+
+            <TextView
+                android:id="@+id/tv_notes"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp"
+                android:visibility="gone"
+                tools:text="Verified QR scan"
+                tools:visibility="visible" />
 
         </LinearLayout>
 

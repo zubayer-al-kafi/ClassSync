@@ -1,7 +1,5 @@
 package com.example.smartattendancemanagementsystem.ui;
 
-import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.view.LayoutInflater;
@@ -16,12 +14,16 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.ViewModelProvider;
 
 import com.example.smartattendancemanagementsystem.R;
 import com.example.smartattendancemanagementsystem.adapter.CourseMaterialAdapter;
 import com.example.smartattendancemanagementsystem.databinding.FragmentCourseMaterialsBinding;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.model.CourseMaterial;
+import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.session.SessionViewModel;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
@@ -38,6 +40,9 @@ public class CourseMaterialsFragment extends Fragment {
     private CourseMaterialAdapter adapter;
     private FirebaseAuth mAuth;
     private FirebaseFirestore db;
+    private SessionViewModel session;
+
+    private final ClassroomRepository classrooms = ClassroomRepository.getInstance();
 
     private final List<Classroom> availableClassrooms = new ArrayList<>();
     private final List<CourseMaterial> materialsList = new ArrayList<>();
@@ -45,6 +50,7 @@ public class CourseMaterialsFragment extends Fragment {
 
     private Classroom selectedClassroom;
     private String targetClassIdFromArgs;
+    private boolean isTeacher;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -59,6 +65,7 @@ public class CourseMaterialsFragment extends Fragment {
 
         mAuth = FirebaseAuth.getInstance();
         db = FirebaseFirestore.getInstance();
+        session = new ViewModelProvider(requireActivity()).get(SessionViewModel.class);
 
         if (getArguments() != null) {
             targetClassIdFromArgs = getArguments().getString("classId");
@@ -67,14 +74,16 @@ public class CourseMaterialsFragment extends Fragment {
         adapter = new CourseMaterialAdapter();
         binding.rvMaterials.setAdapter(adapter);
 
-        SharedPreferences prefs = requireContext().getSharedPreferences("app_session", Context.MODE_PRIVATE);
-        String role = prefs.getString("role", "Student");
-        boolean isTeacher = "Instructor".equalsIgnoreCase(role) || "Teacher".equalsIgnoreCase(role);
-
-        binding.cardInstructorPost.setVisibility(isTeacher ? View.VISIBLE : View.GONE);
-
         binding.btnAddMaterialLink.setOnClickListener(v -> addMaterialLink());
         binding.btnPublishPost.setOnClickListener(v -> publishMaterialPost());
+
+        // The role comes from users/{uid} via the session, never from local storage.
+        session.getState().observe(getViewLifecycleOwner(), state -> {
+            if (binding == null) return;
+            isTeacher = state != null && state.isReady()
+                    && "Instructor".equals(state.normalizedRole());
+            binding.cardInstructorPost.setVisibility(isTeacher ? View.VISIBLE : View.GONE);
+        });
 
         if (targetClassIdFromArgs != null && !targetClassIdFromArgs.isEmpty()) {
             loadCourseMaterials(targetClassIdFromArgs);
@@ -84,9 +93,10 @@ public class CourseMaterialsFragment extends Fragment {
     }
 
     private void addMaterialLink() {
-        String inputLink = binding.etMaterialLinkInput.getText() != null ? binding.etMaterialLinkInput.getText().toString().trim() : "";
+        String inputLink = binding.etMaterialLinkInput.getText() != null
+                ? binding.etMaterialLinkInput.getText().toString().trim() : "";
         if (TextUtils.isEmpty(inputLink)) {
-            Toast.makeText(requireContext(), "Please paste a valid URL / link", Toast.LENGTH_SHORT).show();
+            toast("Please paste a valid URL / link");
             return;
         }
 
@@ -109,13 +119,15 @@ public class CourseMaterialsFragment extends Fragment {
             itemLayout.setPadding(0, 4, 0, 4);
 
             TextView linkTv = new TextView(requireContext());
-            linkTv.setText("🔗 #" + (index + 1) + ": " + link);
+            linkTv.setText("#" + (index + 1) + ": " + link);
             linkTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.secondary));
             linkTv.setTextSize(12);
-            linkTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            linkTv.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            MaterialButton removeBtn = new MaterialButton(requireContext(), null, com.google.android.material.R.attr.borderlessButtonStyle);
-            removeBtn.setText("❌");
+            MaterialButton removeBtn = new MaterialButton(requireContext(), null,
+                    com.google.android.material.R.attr.borderlessButtonStyle);
+            removeBtn.setText("Remove");
             removeBtn.setPadding(0, 0, 0, 0);
 
             removeBtn.setOnClickListener(v -> {
@@ -134,34 +146,43 @@ public class CourseMaterialsFragment extends Fragment {
         if (currentUser == null) return;
 
         String uid = currentUser.getUid();
+        boolean instructor = session.isInstructor();
+
         binding.progressBar.setVisibility(View.VISIBLE);
 
-        db.collection("classrooms").get()
-                .addOnSuccessListener(snapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        availableClassrooms.clear();
-                        List<String> names = new ArrayList<>();
-                        int selectedIndex = 0;
+        classrooms.loadMine(uid, instructor)
+                .addOnSuccessListener(fetched -> {
+                    if (!isAdded() || binding == null) return;
 
-                        for (QueryDocumentSnapshot doc : snapshots) {
-                            Classroom c = doc.toObject(Classroom.class);
-                            if (c.isTeacherAssigned(uid) || (c.getEnrolledStudentIds() != null && c.getEnrolledStudentIds().contains(uid))) {
-                                availableClassrooms.add(c);
-                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
+                    binding.progressBar.setVisibility(View.GONE);
+                    availableClassrooms.clear();
+                    availableClassrooms.addAll(fetched);
 
-                                if (targetClassIdFromArgs != null && targetClassIdFromArgs.equals(c.getClassId())) {
-                                    selectedIndex = availableClassrooms.size() - 1;
-                                }
-                            }
-                        }
+                    List<String> names = new ArrayList<>();
+                    int selectedIndex = 0;
 
-                        if (!availableClassrooms.isEmpty()) {
-                            setupDropdown(names, selectedIndex);
-                        } else {
-                            binding.tvEmptyMaterials.setVisibility(materialsList.isEmpty() ? View.VISIBLE : View.GONE);
+                    for (Classroom c : availableClassrooms) {
+                        names.add(c.getClassName() + " (" + c.getClassCode() + ")");
+                        if (targetClassIdFromArgs != null
+                                && targetClassIdFromArgs.equals(c.getClassId())) {
+                            selectedIndex = availableClassrooms.size() - 1;
                         }
                     }
+
+                    if (!availableClassrooms.isEmpty()) {
+                        setupDropdown(names, selectedIndex);
+                    } else {
+                        binding.tvEmptyMaterials.setText(
+                                "You are not in any classroom yet. Join one with a class code first.");
+                        binding.tvEmptyMaterials.setVisibility(View.VISIBLE);
+                    }
+                })
+                .addOnFailureListener(e -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.tvEmptyMaterials.setText(
+                            UiErrors.describe(e, "Could not load your classrooms."));
+                    binding.tvEmptyMaterials.setVisibility(View.VISIBLE);
                 });
     }
 
@@ -185,7 +206,7 @@ public class CourseMaterialsFragment extends Fragment {
     }
 
     private void loadCourseMaterials(String classId) {
-        if (classId == null) return;
+        if (classId == null || binding == null) return;
 
         binding.progressBar.setVisibility(View.VISIBLE);
 
@@ -193,36 +214,47 @@ public class CourseMaterialsFragment extends Fragment {
                 .whereEqualTo("classId", classId)
                 .get()
                 .addOnSuccessListener(snapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        materialsList.clear();
-                        for (QueryDocumentSnapshot doc : snapshots) {
-                            materialsList.add(doc.toObject(CourseMaterial.class));
-                        }
-                        Collections.sort(materialsList, (m1, m2) -> Long.compare(m2.getTimestamp(), m1.getTimestamp()));
-                        adapter.setMaterials(materialsList);
-                        binding.tvEmptyMaterials.setVisibility(materialsList.isEmpty() ? View.VISIBLE : View.GONE);
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    materialsList.clear();
+                    for (QueryDocumentSnapshot doc : snapshots) {
+                        CourseMaterial material = doc.toObject(CourseMaterial.class);
+                        if (material != null) materialsList.add(material);
+                    }
+                    Collections.sort(materialsList,
+                            (m1, m2) -> Long.compare(m2.getTimestamp(), m1.getTimestamp()));
+                    adapter.setMaterials(materialsList);
+
+                    if (materialsList.isEmpty()) {
+                        binding.tvEmptyMaterials.setText("No materials posted for this class yet.");
+                        binding.tvEmptyMaterials.setVisibility(View.VISIBLE);
+                    } else {
+                        binding.tvEmptyMaterials.setVisibility(View.GONE);
                     }
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        binding.tvEmptyMaterials.setVisibility(materialsList.isEmpty() ? View.VISIBLE : View.GONE);
-                    }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.tvEmptyMaterials.setText(
+                            UiErrors.describe(e, "Could not load the course materials."));
+                    binding.tvEmptyMaterials.setVisibility(View.VISIBLE);
                 });
     }
 
     private void publishMaterialPost() {
         if (selectedClassroom == null) {
-            Toast.makeText(requireContext(), "Select a classroom first", Toast.LENGTH_SHORT).show();
+            toast("Select a classroom first");
             return;
         }
 
-        String title = binding.etPostTitle.getText() != null ? binding.etPostTitle.getText().toString().trim() : "";
-        String desc = binding.etPostDescription.getText() != null ? binding.etPostDescription.getText().toString().trim() : "";
+        String title = binding.etPostTitle.getText() != null
+                ? binding.etPostTitle.getText().toString().trim() : "";
+        String desc = binding.etPostDescription.getText() != null
+                ? binding.etPostDescription.getText().toString().trim() : "";
 
         if (TextUtils.isEmpty(title)) {
-            Toast.makeText(requireContext(), "Please enter a title", Toast.LENGTH_SHORT).show();
+            toast("Please enter a title");
             return;
         }
 
@@ -233,29 +265,43 @@ public class CourseMaterialsFragment extends Fragment {
 
         FirebaseUser currentUser = mAuth.getCurrentUser();
         String uid = currentUser != null ? currentUser.getUid() : "";
-        String authorName = currentUser != null && currentUser.getDisplayName() != null && !currentUser.getDisplayName().isEmpty()
+        String authorName = currentUser != null && currentUser.getDisplayName() != null
+                && !currentUser.getDisplayName().isEmpty()
                 ? currentUser.getDisplayName() : "Instructor";
 
         String materialId = db.collection("materials").document().getId();
 
         CourseMaterial material = new CourseMaterial(
                 materialId, selectedClassroom.getClassId(), selectedClassroom.getClassName(),
-                title, desc, combinedFileUrl.toString().trim(), uid, authorName, System.currentTimeMillis()
+                title, desc, combinedFileUrl.toString().trim(), uid, authorName,
+                System.currentTimeMillis()
         );
 
         binding.progressBar.setVisibility(View.VISIBLE);
         db.collection("materials").document(materialId).set(material)
                 .addOnSuccessListener(aVoid -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        binding.etPostTitle.setText("");
-                        binding.etPostDescription.setText("");
-                        addedMaterialLinks.clear();
-                        renderMaterialLinksContainer();
-                        Toast.makeText(requireContext(), "Published to course stream!", Toast.LENGTH_SHORT).show();
-                        loadCourseMaterials(selectedClassroom.getClassId());
-                    }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.etPostTitle.setText("");
+                    binding.etPostDescription.setText("");
+                    addedMaterialLinks.clear();
+                    renderMaterialLinksContainer();
+                    toast("Published to course stream");
+                    loadCourseMaterials(selectedClassroom.getClassId());
+                })
+                .addOnFailureListener(e -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    Toast.makeText(requireContext(),
+                            UiErrors.describe(e, "Could not publish the material."),
+                            Toast.LENGTH_LONG).show();
                 });
+    }
+
+    private void toast(String message) {
+        if (isAdded() && getContext() != null) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override

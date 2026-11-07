@@ -27,6 +27,7 @@ import com.example.smartattendancemanagementsystem.databinding.FragmentEditClass
 import com.example.smartattendancemanagementsystem.model.ClassSlot;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
@@ -35,7 +36,9 @@ import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.FirebaseFirestore;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class EditClassroomFragment extends Fragment {
 
@@ -196,10 +199,13 @@ public class EditClassroomFragment extends Fragment {
             return;
         }
 
-        int minThreshold = 75;
+        int parsedThreshold = 75;
         try {
-            minThreshold = Integer.parseInt(thresholdStr);
-        } catch (NumberFormatException ignored) {}
+            parsedThreshold = Integer.parseInt(thresholdStr);
+        } catch (NumberFormatException ignored) {
+        }
+        // Captured by the success listener below, so it must be effectively final.
+        final int minThreshold = parsedThreshold;
 
         FirebaseUser currentUser = mAuth.getCurrentUser();
         if (currentUser == null) {
@@ -207,26 +213,51 @@ public class EditClassroomFragment extends Fragment {
             return;
         }
 
-        String teacherUid = currentUser.getUid();
-        String teacherName = currentUser.getDisplayName() != null && !currentUser.getDisplayName().isEmpty()
-                ? currentUser.getDisplayName() : (currentUser.getEmail() != null ? currentUser.getEmail() : "Instructor");
+        // Editing must never resurrect a document from partial state: if the class
+        // has not loaded yet there is no safe way to merge, so refuse instead of
+        // writing a rebuilt copy that would drop the join code and the roster.
+        if (currentClassroom == null || classroomId == null) {
+            Toast.makeText(requireContext(),
+                    "This classroom is still loading. Try again in a moment.",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
 
-        String targetId = currentClassroom != null ? currentClassroom.getClassId() : (classroomId != null ? classroomId : db.collection("classrooms").document().getId());
-        String classCode = currentClassroom != null ? currentClassroom.getClassCode() : "CODE";
-        List<String> enrolled = currentClassroom != null ? currentClassroom.getEnrolledStudentIds() : new ArrayList<>();
+        // Field-scoped update. Only the editable settings are sent; classCode,
+        // enrolledStudentIds, teacherId and createdAt are left untouched.
+        List<ClassSlot> slots = new ArrayList<>(activeSlots);
 
-        Classroom updatedClassroom = new Classroom(
-                targetId, className, subject, classCode,
-                teacherUid, teacherName, minThreshold,
-                manualAllowed, new ArrayList<>(activeSlots),
-                enrolled, System.currentTimeMillis()
-        );
+        Map<String, Object> changes = new HashMap<>();
+        changes.put("className", className);
+        changes.put("subject", subject);
+        changes.put("minThreshold", minThreshold);
+        changes.put("manualAttendanceAllowed", manualAllowed);
+        changes.put("classSlots", slots);
 
-        ClassroomRepository.getInstance().addClassroom(updatedClassroom);
-        db.collection("classrooms").document(targetId).set(updatedClassroom);
+        binding.btnSaveClassroom.setEnabled(false);
 
-        Toast.makeText(requireContext(), "Classroom routine & settings saved successfully!", Toast.LENGTH_LONG).show();
-        Navigation.findNavController(view).popBackStack();
+        db.collection("classrooms").document(classroomId).update(changes)
+                .addOnSuccessListener(aVoid -> {
+                    currentClassroom.setClassName(className);
+                    currentClassroom.setSubject(subject);
+                    currentClassroom.setMinThreshold(minThreshold);
+                    currentClassroom.setManualAttendanceAllowed(manualAllowed);
+                    currentClassroom.setClassSlots(slots);
+                    ClassroomRepository.getInstance().addClassroom(currentClassroom);
+
+                    if (!isAdded() || binding == null) return;
+                    binding.btnSaveClassroom.setEnabled(true);
+                    Toast.makeText(requireContext(),
+                            "Classroom routine & settings saved.", Toast.LENGTH_LONG).show();
+                    Navigation.findNavController(view).popBackStack();
+                })
+                .addOnFailureListener(e -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.btnSaveClassroom.setEnabled(true);
+                    Toast.makeText(requireContext(),
+                            UiErrors.describe(e, "Could not save these settings."),
+                            Toast.LENGTH_LONG).show();
+                });
     }
 
     private void confirmAndDeleteClassroom() {
@@ -255,7 +286,11 @@ public class EditClassroomFragment extends Fragment {
                 .setView(layout)
                 .setPositiveButton("Delete Classroom", (d, which) -> {
                     ClassroomRepository.getInstance().deleteClassroom(currentClassroom.getClassId());
-                    db.collection("classrooms").document(currentClassroom.getClassId()).delete();
+                    ClassroomRepository.getInstance().releaseCode(currentClassroom.getClassCode());
+                    db.collection("classrooms").document(currentClassroom.getClassId()).delete()
+                            .addOnFailureListener(e -> Toast.makeText(requireContext(),
+                                    UiErrors.describe(e, "Could not delete this classroom."),
+                                    Toast.LENGTH_LONG).show());
                     Toast.makeText(requireContext(), currentClassroom.getClassName() + " deleted.", Toast.LENGTH_SHORT).show();
 
                     // Closes both EditClassroomFragment and ClassroomDetailFragment, returning to Dashboard

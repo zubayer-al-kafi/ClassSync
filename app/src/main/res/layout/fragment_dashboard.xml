@@ -13,6 +13,20 @@
         android:orientation="vertical"
         android:padding="20dp">
 
+        <!-- Session / connectivity problems surface here instead of as an empty list -->
+        <TextView
+            android:id="@+id/tv_dashboard_banner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:background="@color/dark_surface_variant"
+            android:padding="12dp"
+            android:textColor="@color/status_late"
+            android:textSize="13sp"
+            android:visibility="gone"
+            tools:text="You are offline. Check your connection and try again."
+            tools:visibility="visible" />
+
         <!-- INSTRUCTOR CONSOLE -->
         <LinearLayout
             android:id="@+id/layout_teacher_console"
@@ -68,6 +82,17 @@
                 android:layout_marginTop="8dp"
                 app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager" />
 
+            <TextView
+                android:id="@+id/tv_empty_teacher_schedule"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="No classes scheduled for today."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
             <!-- Created Courses -->
             <TextView
                 android:layout_width="wrap_content"
@@ -84,6 +109,17 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager" />
+
+            <TextView
+                android:id="@+id/tv_empty_teacher_classes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="You have not created a classroom yet."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
 
         </LinearLayout>
 
@@ -142,6 +178,17 @@
                 android:layout_marginTop="8dp"
                 app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager" />
 
+            <TextView
+                android:id="@+id/tv_empty_student_schedule"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="No classes scheduled for today."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
+
             <!-- Enrolled Courses -->
             <TextView
                 android:layout_width="wrap_content"
@@ -158,6 +205,17 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
                 app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager" />
+
+            <TextView
+                android:id="@+id/tv_empty_joined_classes"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="You have not joined a classroom yet. Use a class code to join one."
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp"
+                android:visibility="gone"
+                tools:visibility="visible" />
 
         </LinearLayout>
 

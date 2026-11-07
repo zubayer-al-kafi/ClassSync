@@ -1,5 +1,7 @@
 package com.example.smartattendancemanagementsystem.model;
 
+import com.example.smartattendancemanagementsystem.util.AppClock;
+
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Locale;
@@ -8,6 +10,7 @@ public class ClassSlot {
     private String dayOfWeek; // e.g. "MONDAY", "WEDNESDAY"
     private String startTime; // e.g. "09:00"
     private String endTime;   // e.g. "10:30"
+    private String slotId;    // e.g. "MONDAY_0900" - stable key used by attendance records
 
     public ClassSlot() {
         // Firestore required
@@ -17,7 +20,18 @@ public class ClassSlot {
         this.dayOfWeek = dayOfWeek != null ? dayOfWeek.toUpperCase() : "MONDAY";
         this.startTime = startTime != null ? startTime : "09:00";
         this.endTime = endTime != null ? endTime : "10:30";
+        this.slotId = AppClock.slotKey(this.dayOfWeek, this.startTime);
     }
+
+    /**
+     * Derived for slots stored before slotId existed, so old schedules keep working.
+     */
+    public String getSlotId() {
+        if (slotId != null && !slotId.isEmpty()) return slotId;
+        return AppClock.slotKey(dayOfWeek, startTime);
+    }
+
+    public void setSlotId(String slotId) { this.slotId = slotId; }
 
     public boolean isSlotToday() {
         if (dayOfWeek == null) return false;

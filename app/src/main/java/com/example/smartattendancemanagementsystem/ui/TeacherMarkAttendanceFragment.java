@@ -17,22 +17,36 @@ import com.example.smartattendancemanagementsystem.databinding.FragmentTeacherMa
 import com.example.smartattendancemanagementsystem.model.AttendanceRecord;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.model.User;
+import com.example.smartattendancemanagementsystem.repository.AttendanceRepository;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.repository.UserRepository;
+import com.example.smartattendancemanagementsystem.util.AppClock;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.Tasks;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
 import com.google.firebase.firestore.FirebaseFirestore;
 import com.google.firebase.firestore.ListenerRegistration;
 import com.google.firebase.firestore.QueryDocumentSnapshot;
+import com.google.firebase.firestore.SetOptions;
+import com.google.firebase.firestore.WriteBatch;
 
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
+/**
+ * Instructor roll call.
+ *
+ * Writes go out as batched commits with per-student outcome reporting, instead of a
+ * loop of unobserved set() calls followed by an unconditional "success" toast.
+ */
 public class TeacherMarkAttendanceFragment extends Fragment {
+
+    /** Firestore allows 500 writes per commit; stay under it. */
+    private static final int BATCH_SIZE = 450;
 
     private FragmentTeacherMarkAttendanceBinding binding;
     private StudentAttendanceAdapter adapter;
@@ -40,10 +54,15 @@ public class TeacherMarkAttendanceFragment extends Fragment {
     private FirebaseFirestore db;
     private ListenerRegistration liveAttendanceListener;
 
-    private final List<Classroom> classrooms = new ArrayList<>();
+    private final ClassroomRepository classrooms = ClassroomRepository.getInstance();
+    private final UserRepository users = new UserRepository();
+
+    private final List<Classroom> teacherClassrooms = new ArrayList<>();
     private final List<User> enrolledStudents = new ArrayList<>();
+
     private Classroom selectedClassroom;
-    private String currentDateStr;
+    private String currentDate;
+    private String currentSlotId;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -59,9 +78,8 @@ public class TeacherMarkAttendanceFragment extends Fragment {
         mAuth = FirebaseAuth.getInstance();
         db = FirebaseFirestore.getInstance();
 
-        SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
-        currentDateStr = sdf.format(new Date());
-        binding.tvSelectedDate.setText("Date: " + currentDateStr);
+        currentDate = AppClock.todayIso();
+        binding.tvSelectedDate.setText("Date: " + currentDate);
 
         adapter = new StudentAttendanceAdapter();
         binding.rvStudents.setAdapter(adapter);
@@ -77,57 +95,40 @@ public class TeacherMarkAttendanceFragment extends Fragment {
 
         binding.progressBar.setVisibility(View.VISIBLE);
 
-        List<Classroom> memoryList = ClassroomRepository.getInstance().getTeacherClassrooms(teacherUid);
-
-        db.collection("classrooms")
-                .whereEqualTo("teacherId", teacherUid)
-                .get()
-                .addOnSuccessListener(queryDocumentSnapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        classrooms.clear();
-                        List<String> names = new ArrayList<>();
-
-                        for (QueryDocumentSnapshot doc : queryDocumentSnapshots) {
-                            Classroom c = doc.toObject(Classroom.class);
-                            classrooms.add(c);
-                            names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                        }
-
-                        if (classrooms.isEmpty()) {
-                            classrooms.addAll(memoryList);
-                            for (Classroom c : memoryList) {
-                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                            }
-                        }
-
-                        if (!classrooms.isEmpty()) {
-                            setupDropdown(names);
-                        } else {
-                            binding.tvEmptyStudents.setVisibility(View.VISIBLE);
-                            binding.tvEmptyStudents.setText("No classrooms found. Please create a classroom first.");
-                        }
-                    }
+        classrooms.loadMine(teacherUid, true)
+                .addOnSuccessListener(fetched -> {
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    applyClassrooms(fetched);
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        if (!memoryList.isEmpty()) {
-                            classrooms.addAll(memoryList);
-                            List<String> names = new ArrayList<>();
-                            for (Classroom c : memoryList) {
-                                names.add(c.getClassName() + " (" + c.getClassCode() + ")");
-                            }
-                            setupDropdown(names);
-                        } else {
-                            binding.tvEmptyStudents.setVisibility(View.VISIBLE);
-                            binding.tvEmptyStudents.setText("No classrooms found.");
-                        }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+
+                    List<Classroom> cached = classrooms.getTeacherClassrooms(teacherUid);
+                    if (!cached.isEmpty()) {
+                        applyClassrooms(cached);
+                        toast(UiErrors.describe(e, "Showing cached classrooms."));
+                    } else {
+                        showEmpty(UiErrors.describe(e, "Could not load your classrooms."));
                     }
                 });
     }
 
-    private void setupDropdown(List<String> names) {
+    private void applyClassrooms(List<Classroom> fetched) {
+        teacherClassrooms.clear();
+        teacherClassrooms.addAll(fetched);
+
+        if (teacherClassrooms.isEmpty()) {
+            showEmpty("No classrooms found. Please create a classroom first.");
+            return;
+        }
+
+        List<String> names = new ArrayList<>();
+        for (Classroom c : teacherClassrooms) {
+            names.add(c.getClassName() + " (" + c.getClassCode() + ")");
+        }
+
         ArrayAdapter<String> arrayAdapter = new ArrayAdapter<>(
                 requireContext(),
                 android.R.layout.simple_dropdown_item_1line,
@@ -135,72 +136,79 @@ public class TeacherMarkAttendanceFragment extends Fragment {
         );
         binding.actClassroom.setAdapter(arrayAdapter);
         binding.actClassroom.setOnItemClickListener((parent, view, position, id) -> {
-            selectedClassroom = classrooms.get(position);
+            selectedClassroom = teacherClassrooms.get(position);
             loadEnrolledStudents(selectedClassroom);
         });
 
-        selectedClassroom = classrooms.get(0);
+        selectedClassroom = teacherClassrooms.get(0);
         binding.actClassroom.setText(names.get(0), false);
         loadEnrolledStudents(selectedClassroom);
     }
 
     private void loadEnrolledStudents(Classroom classroom) {
-        if (classroom == null || classroom.getEnrolledStudentIds() == null || classroom.getEnrolledStudentIds().isEmpty()) {
+        if (classroom == null || binding == null) return;
+
+        currentSlotId = AppClock.resolveActiveSlot(classroom.getClassSlots());
+
+        List<String> enrolled = classroom.getEnrolledStudentIds();
+        if (enrolled == null || enrolled.isEmpty()) {
             enrolledStudents.clear();
             adapter.setStudents(enrolledStudents);
-            binding.tvEmptyStudents.setVisibility(View.VISIBLE);
-            binding.tvEmptyStudents.setText("No students currently enrolled in " + (classroom != null ? classroom.getClassName() : "class") + ".");
+            showEmpty("No students currently enrolled in " + classroom.getClassName() + ".");
             return;
         }
 
         binding.progressBar.setVisibility(View.VISIBLE);
-        db.collection("users")
-                .whereIn("uid", classroom.getEnrolledStudentIds())
-                .get()
-                .addOnSuccessListener(queryDocumentSnapshots -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        enrolledStudents.clear();
-                        for (QueryDocumentSnapshot doc : queryDocumentSnapshots) {
-                            enrolledStudents.add(doc.toObject(User.class));
-                        }
-                        sortStudentsByRollNumber(enrolledStudents);
-                        adapter.setStudents(enrolledStudents);
-                        binding.tvEmptyStudents.setVisibility(enrolledStudents.isEmpty() ? View.VISIBLE : View.GONE);
-                        listenToRealtimeAttendance(classroom.getClassId());
-                    }
+
+        users.loadAll(enrolled)
+                .addOnSuccessListener(students -> {
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    enrolledStudents.clear();
+                    enrolledStudents.addAll(students);
+                    sortStudentsByRollNumber(enrolledStudents);
+
+                    adapter.setStudents(enrolledStudents);
+                    binding.tvEmptyStudents.setVisibility(enrolledStudents.isEmpty()
+                            ? View.VISIBLE : View.GONE);
+
+                    listenToRealtimeAttendance(classroom);
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        sortStudentsByRollNumber(enrolledStudents);
-                        adapter.setStudents(enrolledStudents);
-                        binding.tvEmptyStudents.setVisibility(enrolledStudents.isEmpty() ? View.VISIBLE : View.GONE);
-                        listenToRealtimeAttendance(classroom.getClassId());
-                    }
+                    if (!isAdded() || binding == null) return;
+                    binding.progressBar.setVisibility(View.GONE);
+                    showEmpty(UiErrors.describe(e, "Could not load the enrolled students."));
                 });
     }
 
-    private void listenToRealtimeAttendance(String classId) {
-        if (liveAttendanceListener != null) {
-            liveAttendanceListener.remove();
-        }
+    private void listenToRealtimeAttendance(Classroom classroom) {
+        detachListener();
 
         liveAttendanceListener = db.collection("attendance")
-                .whereEqualTo("classId", classId)
-                .whereEqualTo("date", currentDateStr)
+                .whereEqualTo("teacherId", classroom.getTeacherId())
+                .whereEqualTo("classId", classroom.getClassId())
+                .whereEqualTo("date", currentDate)
                 .addSnapshotListener((snapshots, error) -> {
                     if (!isAdded() || error != null || snapshots == null) return;
 
                     Map<String, String> currentMap = adapter.getAttendanceMap();
                     for (QueryDocumentSnapshot doc : snapshots) {
                         AttendanceRecord record = doc.toObject(AttendanceRecord.class);
-                        if (record != null && record.getUserId() != null && record.getStatus() != null) {
-                            currentMap.put(record.getUserId(), record.getStatus());
-                        }
+                        if (record == null || record.getUserId() == null) continue;
+                        if (!currentSlotId.equals(record.getSlotId())) continue;
+                        if (record.getStatus() == null) continue;
+                        currentMap.put(record.getUserId(), record.getStatus());
                     }
                     adapter.notifyDataSetChanged();
                 });
+    }
+
+    private void detachListener() {
+        if (liveAttendanceListener != null) {
+            liveAttendanceListener.remove();
+            liveAttendanceListener = null;
+        }
     }
 
     private void sortStudentsByRollNumber(List<User> list) {
@@ -220,44 +228,106 @@ public class TeacherMarkAttendanceFragment extends Fragment {
 
     private void submitBatchAttendance(View view) {
         if (selectedClassroom == null) {
-            Toast.makeText(requireContext(), "Please select a classroom", Toast.LENGTH_SHORT).show();
+            toast("Please select a classroom");
             return;
         }
 
         Map<String, String> statusMap = adapter.getAttendanceMap();
         if (statusMap.isEmpty()) {
-            Toast.makeText(requireContext(), "No students to mark attendance for", Toast.LENGTH_SHORT).show();
+            toast("No students to mark attendance for");
             return;
         }
+
+        String slotId = currentSlotId != null
+                ? currentSlotId
+                : AppClock.resolveActiveSlot(selectedClassroom.getClassSlots());
 
         binding.progressBar.setVisibility(View.VISIBLE);
         binding.btnSubmitBatch.setEnabled(false);
 
+        List<Task<Void>> commits = new ArrayList<>();
+        WriteBatch batch = db.batch();
+        int pending = 0;
+
         for (User student : enrolledStudents) {
-            String status = statusMap.getOrDefault(student.getUid(), "Present");
-            String docId = student.getUid() + "_" + selectedClassroom.getClassId() + "_" + currentDateStr;
+            String status = statusMap.get(student.getUid());
+            if (status == null) status = "Present";
+
+            String docId = AttendanceRepository.recordId(
+                    student.getUid(), selectedClassroom.getClassId(), currentDate, slotId);
 
             AttendanceRecord record = new AttendanceRecord(
-                    docId, student.getUid(), student.getName(), selectedClassroom.getClassId(),
-                    selectedClassroom.getClassName(), currentDateStr, status, "Instructor Roll Call", System.currentTimeMillis()
-            );
+                    docId, student.getUid(), student.getName(),
+                    selectedClassroom.getClassId(), selectedClassroom.getClassName(),
+                    selectedClassroom.getTeacherId(), currentDate, slotId,
+                    status, "Instructor roll call", System.currentTimeMillis());
 
-            db.collection("attendance").document(docId).set(record);
+            // merge() creates the record when it is missing and only rewrites the
+            // mutable fields when the instructor corrects an existing entry.
+            batch.set(db.collection("attendance").document(docId), record,
+                    SetOptions.merge());
+            pending++;
+
+            if (pending >= BATCH_SIZE) {
+                commits.add(batch.commit());
+                batch = db.batch();
+                pending = 0;
+            }
         }
 
-        binding.progressBar.setVisibility(View.GONE);
-        binding.btnSubmitBatch.setEnabled(true);
-        Toast.makeText(requireContext(), "Class attendance submitted successfully!", Toast.LENGTH_LONG).show();
-        Navigation.findNavController(view).popBackStack();
+        if (pending > 0) {
+            commits.add(batch.commit());
+        }
+
+        final int attempted = enrolledStudents.size();
+
+        Tasks.whenAllComplete(commits)
+                .addOnCompleteListener(completed -> {
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.btnSubmitBatch.setEnabled(true);
+
+                    int failures = 0;
+                    String firstError = null;
+                    for (Task<Void> commit : commits) {
+                        if (!commit.isSuccessful()) {
+                            failures++;
+                            if (firstError == null) {
+                                firstError = UiErrors.describe(commit.getException(),
+                                        "A batch could not be written.");
+                            }
+                        }
+                    }
+
+                    if (failures == 0) {
+                        toast("Attendance saved for " + attempted + " students.");
+                        Navigation.findNavController(view).popBackStack();
+                        return;
+                    }
+
+                    String message = (attempted - failures) + " of " + attempted
+                            + " students saved. " + firstError;
+                    Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show();
+                });
+    }
+
+    private void showEmpty(String message) {
+        if (binding == null) return;
+        binding.tvEmptyStudents.setText(message);
+        binding.tvEmptyStudents.setVisibility(View.VISIBLE);
+    }
+
+    private void toast(String message) {
+        if (isAdded() && getContext() != null) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
+        }
     }
 
     @Override
     public void onDestroyView() {
         super.onDestroyView();
-        if (liveAttendanceListener != null) {
-            liveAttendanceListener.remove();
-            liveAttendanceListener = null;
-        }
+        detachListener();
         binding = null;
     }
 }

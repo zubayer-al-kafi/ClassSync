@@ -49,6 +49,14 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.auth)
     implementation(libs.firebase.firestore)
+    implementation(libs.firebase.functions)
+
+    // Lifecycle (session state)
+    implementation(libs.androidx.lifecycle.viewmodel)
+    implementation(libs.androidx.lifecycle.livedata)
+
+    // Location (server-verified geofence)
+    implementation(libs.play.services.location)
 
     // QR Code Generation & Scanning
     implementation(libs.zxing.core)

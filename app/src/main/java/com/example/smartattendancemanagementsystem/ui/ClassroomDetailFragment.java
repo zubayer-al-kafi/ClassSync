@@ -1,7 +1,5 @@
 package com.example.smartattendancemanagementsystem.ui;
 
-import android.content.Context;
-import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.text.Editable;
@@ -21,12 +19,16 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.ViewModelProvider;
 import androidx.navigation.Navigation;
 
 import com.example.smartattendancemanagementsystem.R;
 import com.example.smartattendancemanagementsystem.databinding.FragmentClassroomDetailBinding;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.session.SessionState;
+import com.example.smartattendancemanagementsystem.session.SessionViewModel;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
@@ -42,6 +44,8 @@ public class ClassroomDetailFragment extends Fragment {
     private String classId;
     private Classroom currentClassroom;
     private boolean isInstructor = false;
+    private SessionViewModel session;
+    private String appliedRole;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -61,9 +65,31 @@ public class ClassroomDetailFragment extends Fragment {
             classId = getArguments().getString("classId");
         }
 
-        SharedPreferences prefs = requireContext().getSharedPreferences("app_session", Context.MODE_PRIVATE);
-        String role = prefs.getString("role", "Student");
-        isInstructor = "Instructor".equalsIgnoreCase(role) || "Teacher".equalsIgnoreCase(role);
+        session = new ViewModelProvider(requireActivity()).get(SessionViewModel.class);
+
+        // The role comes from users/{uid} via the security-rules-protected profile.
+        applyRole("Student");
+        session.getState().observe(getViewLifecycleOwner(), state -> {
+            if (state == null || binding == null) return;
+            if (state.getStatus() == SessionState.Status.READY) {
+                applyRole(state.normalizedRole());
+            }
+        });
+
+        setupTabSwitchers();
+        setupClickListeners();
+        loadClassroomData();
+    }
+
+    /** Swaps the tool panels and tab labels for the given role. Idempotent. */
+    private void applyRole(String role) {
+        if (binding == null) return;
+
+        String normalized = "Instructor".equalsIgnoreCase(role) ? "Instructor" : "Student";
+        if (normalized.equals(appliedRole)) return;
+        appliedRole = normalized;
+
+        isInstructor = "Instructor".equals(normalized);
 
         if (isInstructor) {
             binding.layoutInstructorTools.setVisibility(View.VISIBLE);
@@ -80,10 +106,6 @@ public class ClassroomDetailFragment extends Fragment {
             binding.tvPeopleSubtitle.setText("View your personal attendance record log and session dates");
             binding.btnTabAttendance.setText("✍️ Mark Attendance");
         }
-
-        setupTabSwitchers();
-        setupClickListeners();
-        loadClassroomData();
     }
 
     private void setupTabSwitchers() {
@@ -190,7 +212,31 @@ public class ClassroomDetailFragment extends Fragment {
                         if (c != null) {
                             currentClassroom = c;
                             bindClassroomDetails(currentClassroom);
+                            ensureCodePublished(c);
                         }
+                    }
+                });
+    }
+
+    /**
+     * Classrooms created before classCodes/{CODE} existed have no code mapping, so a
+     * student's join resolves to nothing even though the code on screen is right. The
+     * teacher opening the class republishes it; the rules allow only the class teacher
+     * to write that document.
+     */
+    private void ensureCodePublished(Classroom classroom) {
+        FirebaseUser user = mAuth.getCurrentUser();
+        if (user == null || classroom == null) return;
+        if (classroom.getTeacherId() == null || !classroom.getTeacherId().equals(user.getUid())) return;
+
+        final String code = classroom.getClassCode();
+        if (code == null || code.trim().isEmpty()) return;
+
+        ClassroomRepository repo = ClassroomRepository.getInstance();
+        repo.resolveClassId(code)
+                .addOnSuccessListener(mappedClassId -> {
+                    if (mappedClassId == null) {
+                        repo.registerCode(code, classroom.getClassId());
                     }
                 });
     }
@@ -211,7 +257,14 @@ public class ClassroomDetailFragment extends Fragment {
         binding.switchManualMarking.setOnCheckedChangeListener((buttonView, isChecked) -> {
             c.setManualAttendanceAllowed(isChecked);
             ClassroomRepository.getInstance().addClassroom(c);
-            db.collection("classrooms").document(c.getClassId()).update("manualAttendanceAllowed", isChecked);
+            db.collection("classrooms").document(c.getClassId())
+                    .update("manualAttendanceAllowed", isChecked)
+                    .addOnFailureListener(e -> {
+                        c.setManualAttendanceAllowed(!isChecked);
+                        Toast.makeText(requireContext(),
+                                UiErrors.describe(e, "Could not change the manual marking setting."),
+                                Toast.LENGTH_LONG).show();
+                    });
             Toast.makeText(requireContext(), "Manual marking " + (isChecked ? "enabled" : "disabled"), Toast.LENGTH_SHORT).show();
         });
     }

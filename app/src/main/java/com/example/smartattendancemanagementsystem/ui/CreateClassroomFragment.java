@@ -20,6 +20,7 @@ import com.example.smartattendancemanagementsystem.databinding.FragmentCreateCla
 import com.example.smartattendancemanagementsystem.model.ClassSlot;
 import com.example.smartattendancemanagementsystem.model.Classroom;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.button.MaterialButton;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
@@ -185,43 +186,45 @@ public class CreateClassroomFragment extends Fragment {
                 new ArrayList<>(), System.currentTimeMillis()
         );
 
-        ClassroomRepository.getInstance().addClassroom(classroom);
-
+        // The join code is published only after the classroom exists: classCodes/{CODE}
+        // is what Student joins resolve against, so the two must land together.
         db.collection("classrooms").document(classId)
                 .set(classroom)
+                .onSuccessTask(aVoid ->
+                        ClassroomRepository.getInstance().registerCode(classCode, classId))
                 .addOnSuccessListener(aVoid -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        binding.btnCreateClassroom.setEnabled(true);
-                        Toast.makeText(requireContext(), "Classroom '" + className + "' created! Code: " + classCode, Toast.LENGTH_LONG).show();
+                    ClassroomRepository.getInstance().addClassroom(classroom);
 
-                        if (getView() != null) {
-                            Bundle bundle = new Bundle();
-                            bundle.putString("classId", classId);
-                            try {
-                                Navigation.findNavController(getView()).navigate(R.id.action_createClassroomFragment_to_classroomDetailFragment, bundle);
-                            } catch (Exception e) {
-                                Navigation.findNavController(getView()).popBackStack();
-                            }
+                    if (!isAdded() || binding == null) return;
+
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.btnCreateClassroom.setEnabled(true);
+                    Toast.makeText(requireContext(),
+                            "Classroom '" + className + "' created. Join code: " + classCode,
+                            Toast.LENGTH_LONG).show();
+
+                    if (getView() != null) {
+                        Bundle bundle = new Bundle();
+                        bundle.putString("classId", classId);
+                        try {
+                            Navigation.findNavController(getView())
+                                    .navigate(R.id.action_createClassroomFragment_to_classroomDetailFragment, bundle);
+                        } catch (Exception e) {
+                            Navigation.findNavController(getView()).popBackStack();
                         }
                     }
                 })
                 .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        binding.progressBar.setVisibility(View.GONE);
-                        binding.btnCreateClassroom.setEnabled(true);
-                        Toast.makeText(requireContext(), "Classroom created: " + classCode, Toast.LENGTH_SHORT).show();
+                    if (!isAdded() || binding == null) return;
 
-                        if (getView() != null) {
-                            Bundle bundle = new Bundle();
-                            bundle.putString("classId", classId);
-                            try {
-                                Navigation.findNavController(getView()).navigate(R.id.action_createClassroomFragment_to_classroomDetailFragment, bundle);
-                            } catch (Exception ex) {
-                                Navigation.findNavController(getView()).popBackStack();
-                            }
-                        }
+                    binding.progressBar.setVisibility(View.GONE);
+                    binding.btnCreateClassroom.setEnabled(true);
+
+                    String message = UiErrors.describe(e, "Could not create the classroom.");
+                    if (!UiErrors.isOffline(e) && "You do not have permission to do that.".equals(message)) {
+                        message = "Only an instructor account can create a classroom.";
                     }
+                    Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show();
                 });
     }
 

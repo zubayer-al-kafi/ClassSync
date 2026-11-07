@@ -1,7 +1,5 @@
 package com.example.smartattendancemanagementsystem.ui;
 
-import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.text.Editable;
 import android.text.InputType;
@@ -20,6 +18,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.core.content.ContextCompat;
 import androidx.fragment.app.Fragment;
+import androidx.lifecycle.ViewModelProvider;
 import androidx.navigation.Navigation;
 
 import com.example.smartattendancemanagementsystem.R;
@@ -27,8 +26,10 @@ import com.example.smartattendancemanagementsystem.adapter.ClassroomAdapter;
 import com.example.smartattendancemanagementsystem.adapter.ScheduleAdapter;
 import com.example.smartattendancemanagementsystem.databinding.FragmentDashboardBinding;
 import com.example.smartattendancemanagementsystem.model.Classroom;
-import com.example.smartattendancemanagementsystem.model.User;
 import com.example.smartattendancemanagementsystem.repository.ClassroomRepository;
+import com.example.smartattendancemanagementsystem.session.SessionState;
+import com.example.smartattendancemanagementsystem.session.SessionViewModel;
+import com.example.smartattendancemanagementsystem.util.UiErrors;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.firebase.auth.FirebaseAuth;
 import com.google.firebase.auth.FirebaseUser;
@@ -40,7 +41,8 @@ import com.google.firebase.firestore.QueryDocumentSnapshot;
 import java.util.ArrayList;
 import java.util.List;
 
-public class DashboardFragment extends Fragment implements ClassroomAdapter.OnClassroomActionListener, ClassroomRepository.OnClassroomDeletedListener {
+public class DashboardFragment extends Fragment
+        implements ClassroomAdapter.OnClassroomActionListener, ClassroomRepository.OnClassroomDeletedListener {
 
     private FragmentDashboardBinding binding;
     private ClassroomAdapter teacherClassroomAdapter;
@@ -49,8 +51,11 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
     private ScheduleAdapter studentScheduleAdapter;
     private FirebaseAuth mAuth;
     private FirebaseFirestore db;
+    private SessionViewModel session;
+
     private ListenerRegistration classroomsListener;
-    private String activeStudentUid;
+    private String renderedRole;
+    private String renderedUid;
 
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, ViewGroup container,
@@ -65,34 +70,75 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
 
         mAuth = FirebaseAuth.getInstance();
         db = FirebaseFirestore.getInstance();
+        session = new ViewModelProvider(requireActivity()).get(SessionViewModel.class);
 
         setupAdapters();
 
-        SharedPreferences prefs = requireContext().getSharedPreferences("app_session", Context.MODE_PRIVATE);
-        String sessionRole = prefs.getString("role", null);
-
-        FirebaseUser currentUser = mAuth.getCurrentUser();
-        if (currentUser != null) {
-            loadUserProfile(currentUser.getUid(), currentUser.getEmail(), sessionRole);
-        } else {
-            prefs.edit().clear().apply();
-            try {
-                Navigation.findNavController(view).navigate(R.id.action_dashboardFragment_to_loginFragment);
-            } catch (Exception ignored) {}
-            return;
-        }
-
         binding.btnCreateClassroomDashboard.setOnClickListener(v ->
-                Navigation.findNavController(v).navigate(R.id.action_dashboardFragment_to_createClassroomFragment)
-        );
+                Navigation.findNavController(v).navigate(R.id.action_dashboardFragment_to_createClassroomFragment));
 
         binding.btnJoinClassroomDashboard.setOnClickListener(v ->
-                Navigation.findNavController(v).navigate(R.id.action_dashboardFragment_to_joinClassroomFragment)
-        );
+                Navigation.findNavController(v).navigate(R.id.action_dashboardFragment_to_joinClassroomFragment));
+
+        session.getState().observe(getViewLifecycleOwner(), this::renderSession);
+    }
+
+    private void renderSession(SessionState state) {
+        if (state == null || binding == null) return;
+
+        switch (state.getStatus()) {
+            case READY:
+                renderConsole(state);
+                break;
+            case ERROR:
+                showBanner(state.getMessage());
+                break;
+            case SIGNED_OUT:
+                detachClassroomsListener();
+                ClassroomRepository.getInstance().clearAllData();
+                if (getView() != null) {
+                    try {
+                        Navigation.findNavController(requireView())
+                                .navigate(R.id.action_dashboardFragment_to_loginFragment);
+                    } catch (Exception ignored) {
+                        // Already on the login destination.
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void renderConsole(SessionState state) {
+        String role = state.normalizedRole();
+        String uid = state.getUser() != null ? state.getUser().getUid() : null;
+        if (uid == null) return;
+
+        if (role.equals(renderedRole) && uid.equals(renderedUid)) return;
+
+        renderedRole = role;
+        renderedUid = uid;
+
+        if ("Instructor".equals(role)) {
+            detachClassroomsListener();
+            binding.layoutTeacherConsole.setVisibility(View.VISIBLE);
+            binding.layoutStudentPortal.setVisibility(View.GONE);
+            loadTeacherData(uid);
+        } else {
+            binding.layoutTeacherConsole.setVisibility(View.GONE);
+            binding.layoutStudentPortal.setVisibility(View.VISIBLE);
+            loadStudentData(uid);
+        }
+    }
+
+    private void showBanner(String message) {
+        if (binding == null || message == null) return;
+        binding.tvDashboardBanner.setText(message);
+        binding.tvDashboardBanner.setVisibility(View.VISIBLE);
     }
 
     private void setupAdapters() {
-        // Teacher Adapters
         teacherClassroomAdapter = new ClassroomAdapter(new ClassroomAdapter.OnClassroomActionListener() {
             @Override
             public void onMarkAttendance(Classroom classroom) {
@@ -111,11 +157,15 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
 
             @Override
             public void onDeleteClassroom(Classroom classroom) {
-                if (classroom != null) {
-                    ClassroomRepository.getInstance().deleteClassroom(classroom.getClassId());
-                    db.collection("classrooms").document(classroom.getClassId()).delete();
-                    Toast.makeText(requireContext(), "Course deleted.", Toast.LENGTH_SHORT).show();
-                }
+                if (classroom == null) return;
+
+                ClassroomRepository.getInstance().deleteClassroom(classroom.getClassId());
+                db.collection("classrooms").document(classroom.getClassId()).delete()
+                        .addOnFailureListener(e -> toast(UiErrors.describe(e, "Could not delete the course.")));
+                ClassroomRepository.getInstance().releaseCode(classroom.getClassCode());
+
+                toast("Course deleted.");
+                if (renderedUid != null) loadTeacherData(renderedUid);
             }
         });
         teacherClassroomAdapter.setTeacherMode(true);
@@ -125,20 +175,21 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
             @Override
             public void onPrimaryAction(Classroom classroom) {
                 if (getView() != null) {
-                    Navigation.findNavController(getView()).navigate(R.id.action_dashboardFragment_to_generateQrFragment);
+                    Navigation.findNavController(getView())
+                            .navigate(R.id.action_dashboardFragment_to_generateQrFragment);
                 }
             }
 
             @Override
             public void onSecondaryAction(Classroom classroom) {
                 if (getView() != null) {
-                    Navigation.findNavController(getView()).navigate(R.id.action_dashboardFragment_to_teacherMarkAttendanceFragment);
+                    Navigation.findNavController(getView())
+                            .navigate(R.id.action_dashboardFragment_to_teacherMarkAttendanceFragment);
                 }
             }
         }, true);
         binding.rvTeacherSchedule.setAdapter(teacherScheduleAdapter);
 
-        // Student Adapters
         studentClassroomAdapter = new ClassroomAdapter(new ClassroomAdapter.OnClassroomActionListener() {
             @Override
             public void onMarkAttendance(Classroom classroom) {
@@ -164,14 +215,16 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
             @Override
             public void onPrimaryAction(Classroom classroom) {
                 if (getView() != null) {
-                    Navigation.findNavController(getView()).navigate(R.id.action_dashboardFragment_to_scanQrFragment);
+                    Navigation.findNavController(getView())
+                            .navigate(R.id.action_dashboardFragment_to_scanQrFragment);
                 }
             }
 
             @Override
             public void onSecondaryAction(Classroom classroom) {
                 if (getView() != null) {
-                    Navigation.findNavController(getView()).navigate(R.id.action_dashboardFragment_to_markAttendanceFragment);
+                    Navigation.findNavController(getView())
+                            .navigate(R.id.action_dashboardFragment_to_markAttendanceFragment);
                 }
             }
         }, false);
@@ -182,132 +235,101 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
         if (classroom != null && getView() != null) {
             Bundle bundle = new Bundle();
             bundle.putString("classId", classroom.getClassId());
-            Navigation.findNavController(getView()).navigate(R.id.action_dashboardFragment_to_classroomDetailFragment, bundle);
+            Navigation.findNavController(getView())
+                    .navigate(R.id.action_dashboardFragment_to_classroomDetailFragment, bundle);
         }
-    }
-
-    private void loadUserProfile(String uid, String email, String sessionRole) {
-        db.collection("users").document(uid).get()
-                .addOnSuccessListener(documentSnapshot -> {
-                    if (isAdded()) {
-                        if (documentSnapshot.exists()) {
-                            User user = documentSnapshot.toObject(User.class);
-                            if (user != null) {
-                                if (user.isInstructor()) {
-                                    showTeacherConsole(uid);
-                                } else {
-                                    showStudentPortal(uid);
-                                }
-                                return;
-                            }
-                        }
-                        applyFallbackRole(uid, email, sessionRole);
-                    }
-                })
-                .addOnFailureListener(e -> {
-                    if (isAdded()) {
-                        applyFallbackRole(uid, email, sessionRole);
-                    }
-                });
-    }
-
-    private void applyFallbackRole(String uid, String email, String sessionRole) {
-        if ("Instructor".equalsIgnoreCase(sessionRole) || "Teacher".equalsIgnoreCase(sessionRole)) {
-            showTeacherConsole(uid);
-        } else {
-            showStudentPortal(uid);
-        }
-    }
-
-    private void showTeacherConsole(String teacherUid) {
-        binding.layoutTeacherConsole.setVisibility(View.VISIBLE);
-        binding.layoutStudentPortal.setVisibility(View.GONE);
-        loadTeacherData(teacherUid);
-    }
-
-    private void showStudentPortal(String studentUid) {
-        this.activeStudentUid = studentUid;
-        binding.layoutTeacherConsole.setVisibility(View.GONE);
-        binding.layoutStudentPortal.setVisibility(View.VISIBLE);
-
-        ClassroomRepository.getInstance().addClassroomDeletedListener(this);
-        loadJoinedClassrooms(studentUid);
     }
 
     private void loadTeacherData(String teacherUid) {
-        List<Classroom> teacherClasses = ClassroomRepository.getInstance().getTeacherClassrooms(teacherUid);
-        teacherScheduleAdapter.setScheduledClasses(teacherClasses);
-        teacherClassroomAdapter.setClassrooms(teacherClasses);
+        List<Classroom> cached = ClassroomRepository.getInstance().getTeacherClassrooms(teacherUid);
+        teacherScheduleAdapter.setScheduledClasses(cached);
+        teacherClassroomAdapter.setClassrooms(cached);
 
-        db.collection("classrooms")
-                .whereEqualTo("teacherId", teacherUid)
-                .get()
-                .addOnSuccessListener(querySnapshots -> {
-                    if (isAdded()) {
-                        List<Classroom> fetched = new ArrayList<>();
-                        for (QueryDocumentSnapshot doc : querySnapshots) {
-                            Classroom c = doc.toObject(Classroom.class);
-                            fetched.add(c);
-                            ClassroomRepository.getInstance().addClassroom(c);
-                        }
-                        if (!fetched.isEmpty()) {
-                            teacherScheduleAdapter.setScheduledClasses(fetched);
-                            teacherClassroomAdapter.setClassrooms(fetched);
-                        }
+        ClassroomRepository.getInstance().loadMine(teacherUid, true)
+                .addOnSuccessListener(classrooms -> {
+                    if (!isAdded()) return;
+                    teacherScheduleAdapter.setScheduledClasses(classrooms);
+                    teacherClassroomAdapter.setClassrooms(classrooms);
+                    updateTeacherEmptyState(classrooms.isEmpty());
+                })
+                .addOnFailureListener(e -> {
+                    if (!isAdded()) return;
+                    updateTeacherEmptyState(cached.isEmpty());
+                    if (cached.isEmpty()) {
+                        showBanner(UiErrors.describe(e, "Could not load your courses."));
+                    } else {
+                        toast(UiErrors.describe(e, "Showing cached courses."));
                     }
                 });
     }
 
-    private void loadJoinedClassrooms(String studentUid) {
-        List<Classroom> memoryJoined = ClassroomRepository.getInstance().getStudentJoinedClassrooms(studentUid);
-        studentScheduleAdapter.setScheduledClasses(memoryJoined);
-        studentClassroomAdapter.setClassrooms(memoryJoined);
+    private void updateTeacherEmptyState(boolean empty) {
+        if (binding == null) return;
+        binding.tvEmptyTeacherClasses.setVisibility(empty ? View.VISIBLE : View.GONE);
+        binding.tvEmptyTeacherSchedule.setVisibility(empty ? View.VISIBLE : View.GONE);
+    }
 
-        if (classroomsListener != null) {
-            classroomsListener.remove();
-        }
+    private void loadStudentData(String studentUid) {
+        ClassroomRepository.getInstance().addClassroomDeletedListener(this);
 
+        List<Classroom> cached = ClassroomRepository.getInstance().getStudentJoinedClassrooms(studentUid);
+        applyStudentClassrooms(cached);
+
+        detachClassroomsListener();
         classroomsListener = db.collection("classrooms")
                 .whereArrayContains("enrolledStudentIds", studentUid)
                 .addSnapshotListener((value, error) -> {
                     if (!isAdded()) return;
+
                     if (error != null || value == null) {
-                        studentClassroomAdapter.setClassrooms(memoryJoined);
-                        studentScheduleAdapter.setScheduledClasses(memoryJoined);
+                        applyStudentClassrooms(cached);
+                        showBanner(UiErrors.describe(error, "Could not load your classrooms."));
                         return;
                     }
 
-                    List<Classroom> joinedList = new ArrayList<>();
+                    List<Classroom> joined = new ArrayList<>();
                     for (QueryDocumentSnapshot doc : value) {
-                        Classroom c = doc.toObject(Classroom.class);
-                        joinedList.add(c);
-                        ClassroomRepository.getInstance().addClassroom(c);
+                        Classroom classroom = doc.toObject(Classroom.class);
+                        if (classroom == null) continue;
+                        joined.add(classroom);
+                        ClassroomRepository.getInstance().addClassroom(classroom);
                     }
-                    if (joinedList.isEmpty() && memoryJoined.isEmpty()) {
-                        studentClassroomAdapter.setClassrooms(new ArrayList<>());
-                        studentScheduleAdapter.setScheduledClasses(new ArrayList<>());
-                    } else if (joinedList.isEmpty()) {
-                        studentClassroomAdapter.setClassrooms(memoryJoined);
-                        studentScheduleAdapter.setScheduledClasses(memoryJoined);
-                    } else {
-                        studentClassroomAdapter.setClassrooms(joinedList);
-                        studentScheduleAdapter.setScheduledClasses(joinedList);
-                    }
+                    applyStudentClassrooms(joined);
                 });
+    }
+
+    private void applyStudentClassrooms(List<Classroom> classrooms) {
+        if (binding == null) return;
+
+        studentClassroomAdapter.setClassrooms(classrooms);
+        studentScheduleAdapter.setScheduledClasses(classrooms);
+
+        boolean empty = classrooms == null || classrooms.isEmpty();
+        binding.tvEmptyJoinedClasses.setVisibility(empty ? View.VISIBLE : View.GONE);
+        binding.tvEmptyStudentSchedule.setVisibility(empty ? View.VISIBLE : View.GONE);
+    }
+
+    private void detachClassroomsListener() {
+        if (classroomsListener != null) {
+            classroomsListener.remove();
+            classroomsListener = null;
+        }
     }
 
     @Override
     public void onClassroomDeleted(String classId, String className) {
-        if (isAdded() && getContext() != null) {
-            new MaterialAlertDialogBuilder(requireContext())
-                    .setTitle("📢 Classroom Notification")
-                    .setMessage("Classroom '" + (className != null ? className : "Course") + "' was deleted by the instructor. You have been automatically unenrolled.")
-                    .setPositiveButton("OK", null)
-                    .show();
+        if (!isAdded() || getContext() == null) return;
 
-            if (activeStudentUid != null) {
-                loadJoinedClassrooms(activeStudentUid);
-            }
+        new MaterialAlertDialogBuilder(requireContext())
+                .setTitle("Classroom removed")
+                .setMessage("Your instructor deleted '"
+                        + (className != null ? className : "Course")
+                        + "'. You have been unenrolled.")
+                .setPositiveButton("OK", null)
+                .show();
+
+        if (renderedUid != null) {
+            loadStudentData(renderedUid);
         }
     }
 
@@ -321,7 +343,8 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
         layout.setPadding(50, 30, 50, 10);
 
         TextView promptTv = new TextView(requireContext());
-        promptTv.setText("To confirm leaving '" + classroom.getClassName() + "', please type the Class Code (" + targetClassCode + ") below:");
+        promptTv.setText("To leave '" + classroom.getClassName()
+                + "', type the Class Code (" + targetClassCode + ") below:");
         promptTv.setTextColor(ContextCompat.getColor(requireContext(), R.color.text_primary));
         promptTv.setTextSize(14);
 
@@ -333,7 +356,7 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
         layout.addView(etConfirm);
 
         final AlertDialog dialog = new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("⚠️ Confirm Unenrollment")
+                .setTitle("Confirm unenrollment")
                 .setView(layout)
                 .setPositiveButton("Unenroll", (d, which) -> {
                     FirebaseUser currentUser = mAuth.getCurrentUser();
@@ -342,10 +365,12 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
 
                     ClassroomRepository.getInstance().unenrollStudent(classroom.getClassId(), studentUid);
                     db.collection("classrooms").document(classroom.getClassId())
-                            .update("enrolledStudentIds", FieldValue.arrayRemove(studentUid));
+                            .update("enrolledStudentIds", FieldValue.arrayRemove(studentUid))
+                            .addOnFailureListener(e ->
+                                    toast(UiErrors.describe(e, "Could not leave the classroom.")));
 
-                    Toast.makeText(requireContext(), "Unenrolled from " + classroom.getClassName(), Toast.LENGTH_SHORT).show();
-                    loadJoinedClassrooms(studentUid);
+                    toast("Left " + classroom.getClassName());
+                    loadStudentData(studentUid);
                 })
                 .setNegativeButton("Cancel", null)
                 .create();
@@ -357,7 +382,8 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
 
         etConfirm.addTextChangedListener(new TextWatcher() {
             @Override
-            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+            }
 
             @Override
             public void onTextChanged(CharSequence s, int start, int before, int count) {
@@ -366,7 +392,8 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
             }
 
             @Override
-            public void afterTextChanged(Editable s) {}
+            public void afterTextChanged(Editable s) {
+            }
         });
     }
 
@@ -380,14 +407,17 @@ public class DashboardFragment extends Fragment implements ClassroomAdapter.OnCl
         openCourseDetail(classroom);
     }
 
+    private void toast(String message) {
+        if (isAdded() && getContext() != null) {
+            Toast.makeText(requireContext(), message, Toast.LENGTH_SHORT).show();
+        }
+    }
+
     @Override
     public void onDestroyView() {
         super.onDestroyView();
         ClassroomRepository.getInstance().removeClassroomDeletedListener(this);
-        if (classroomsListener != null) {
-            classroomsListener.remove();
-            classroomsListener = null;
-        }
+        detachClassroomsListener();
         binding = null;
     }
 }

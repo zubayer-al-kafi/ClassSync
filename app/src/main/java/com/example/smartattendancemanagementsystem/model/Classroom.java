@@ -2,6 +2,7 @@ package com.example.smartattendancemanagementsystem.model;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class Classroom {
     private String classId;
@@ -17,6 +18,8 @@ public class Classroom {
     private List<ClassSlot> classSlots;
     private List<String> enrolledStudentIds;
     private long createdAt;
+    /** Written by Cloud Functions only: the window a student may mark into. */
+    private Map<String, Object> session;
 
     public Classroom() {
         this.coTeacherIds = new ArrayList<>();
@@ -173,4 +176,29 @@ public class Classroom {
 
     public long getCreatedAt() { return createdAt; }
     public void setCreatedAt(long createdAt) { this.createdAt = createdAt; }
+
+    public Map<String, Object> getSession() { return session; }
+    public void setSession(Map<String, Object> session) { this.session = session; }
+
+    /** End of the open marking window, or 0 when no session has been opened. */
+    public long getSessionEndsAtMillis() {
+        Object value = session != null ? session.get("endsAtMillis") : null;
+        return value instanceof Number ? ((Number) value).longValue() : 0L;
+    }
+
+    public String getSessionSlotId() {
+        Object value = session != null ? session.get("slotId") : null;
+        return value instanceof String ? (String) value : null;
+    }
+
+    public String getSessionDate() {
+        Object value = session != null ? session.get("date") : null;
+        return value instanceof String ? (String) value : null;
+    }
+
+    /** True while the period the instructor opened is still running. */
+    public boolean isSessionOpen(long nowMillis) {
+        long endsAt = getSessionEndsAtMillis();
+        return endsAt > nowMillis;
+    }
 }

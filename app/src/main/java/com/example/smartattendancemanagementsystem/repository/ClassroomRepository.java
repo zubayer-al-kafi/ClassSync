@@ -1,9 +1,15 @@
 package com.example.smartattendancemanagementsystem.repository;
 
 import com.example.smartattendancemanagementsystem.model.Classroom;
+import com.google.android.gms.tasks.Task;
+import com.google.android.gms.tasks.Tasks;
+import com.google.firebase.firestore.DocumentSnapshot;
+import com.google.firebase.firestore.FieldValue;
+import com.google.firebase.firestore.FirebaseFirestore;
+import com.google.firebase.firestore.QuerySnapshot;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -14,7 +20,9 @@ public class ClassroomRepository {
     }
 
     private static ClassroomRepository instance;
-    private final Map<String, Classroom> classroomMap = new HashMap<>();
+
+    private final FirebaseFirestore db = FirebaseFirestore.getInstance();
+    private final Map<String, Classroom> classroomMap = new LinkedHashMap<>();
     private final List<OnClassroomDeletedListener> deletedListeners = new ArrayList<>();
 
     private ClassroomRepository() {
@@ -114,5 +122,78 @@ public class ClassroomRepository {
         if (c != null && c.getEnrolledStudentIds() != null && studentUid != null) {
             c.getEnrolledStudentIds().remove(studentUid);
         }
+    }
+
+    public Task<List<Classroom>> loadMine(String uid, boolean instructor) {
+        if (uid == null) return Tasks.forResult(new ArrayList<>());
+
+        Task<QuerySnapshot> taught = instructor
+                ? db.collection("classrooms").whereEqualTo("teacherId", uid).get()
+                : Tasks.forResult(null);
+
+        Task<QuerySnapshot> enrolled = instructor
+                ? Tasks.forResult(null)
+                : db.collection("classrooms").whereArrayContains("enrolledStudentIds", uid).get();
+
+        return Tasks.whenAllSuccess(taught, enrolled).onSuccessTask(results -> {
+            Map<String, Classroom> merged = new LinkedHashMap<>();
+
+            for (Object result : results) {
+                if (!(result instanceof QuerySnapshot)) continue;
+                for (DocumentSnapshot document : ((QuerySnapshot) result).getDocuments()) {
+                    Classroom classroom = document.toObject(Classroom.class);
+                    if (classroom == null || classroom.getClassId() == null) continue;
+                    merged.put(classroom.getClassId(), classroom);
+                    addClassroom(classroom);
+                }
+            }
+
+            return Tasks.forResult(new ArrayList<>(merged.values()));
+        });
+    }
+
+    public Task<String> resolveClassId(String classCode) {
+        if (classCode == null || classCode.trim().isEmpty()) return Tasks.forResult(null);
+
+        String code = classCode.trim().toUpperCase();
+
+        return db.collection("classCodes").document(code).get()
+                .onSuccessTask(codeDoc -> Tasks.forResult(
+                        codeDoc.exists() ? codeDoc.getString("classId") : null));
+    }
+
+    public Task<Void> join(String classId, String studentUid) {
+        if (classId == null || studentUid == null) return Tasks.forResult(null);
+
+        return db.collection("classrooms").document(classId)
+                .update("enrolledStudentIds", FieldValue.arrayUnion(studentUid));
+    }
+
+    public Task<Classroom> load(String classId) {
+        if (classId == null) return Tasks.forResult(null);
+
+        return db.collection("classrooms").document(classId).get()
+                .onSuccessTask(document -> {
+                    if (!document.exists()) return Tasks.forResult(null);
+
+                    Classroom classroom = document.toObject(Classroom.class);
+                    if (classroom != null) addClassroom(classroom);
+                    return Tasks.forResult(classroom);
+                });
+    }
+
+    public Task<Void> registerCode(String classCode, String classId) {
+        if (classCode == null || classId == null) return Tasks.forResult(null);
+
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("classId", classId);
+        value.put("createdAt", System.currentTimeMillis());
+
+        return db.collection("classCodes").document(classCode.toUpperCase()).set(value);
+    }
+
+    public Task<Void> releaseCode(String classCode) {
+        if (classCode == null) return Tasks.forResult(null);
+        return db.collection("classCodes").document(classCode.toUpperCase()).delete();
     }
 }

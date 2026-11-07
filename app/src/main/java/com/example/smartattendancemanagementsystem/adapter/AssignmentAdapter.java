@@ -32,11 +32,18 @@ public class AssignmentAdapter extends RecyclerView.Adapter<AssignmentAdapter.Vi
 
     private List<Assignment> assignments = new ArrayList<>();
     private final OnAssignmentActionListener listener;
-    private final boolean isTeacherMode;
+    private boolean isTeacherMode;
 
     public AssignmentAdapter(OnAssignmentActionListener listener, boolean isTeacherMode) {
         this.listener = listener;
         this.isTeacherMode = isTeacherMode;
+    }
+
+    /** The role arrives asynchronously from users/{uid}, so it can change after binding. */
+    public void setTeacherMode(boolean teacherMode) {
+        if (this.isTeacherMode == teacherMode) return;
+        this.isTeacherMode = teacherMode;
+        notifyDataSetChanged();
     }
 
     public void setAssignments(List<Assignment> assignments) {
